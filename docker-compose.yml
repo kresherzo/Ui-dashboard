@@ -1,0 +1,61 @@
+version: '3.8'
+
+services:
+  # ============ Core Services (auto-start) ============
+  
+  # Redis database (можно отключить если используется внешний Redis)
+  redis:
+    image: redis:7
+    container_name: asr-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - ./redis-data:/data
+    command: redis-server --dir /data --dbfilename dump.rdb --appendonly no --save ""
+    restart: unless-stopped
+    profiles:
+      - local-redis  # Добавь --profile local-redis чтобы запустить локальный Redis
+
+  # FastAPI backend
+  backend:
+    build: ./backend
+    container_name: asr-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - ASR_IMAGE=asr-module:latest
+      - DOCKER_NETWORK=asr-network
+    volumes:
+      # Docker socket for container management
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+
+  # React frontend
+  frontend:
+    build: ./frontend
+    container_name: asr-frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ============ On-Demand Services ============
+  
+  # Mock ASR Module (for testing)
+  mock-asr:
+    build: ./mock_asr
+    container_name: asr-mock
+    environment:
+      - REDIS_HOST=${REDIS_HOST:-redis}
+      - REDIS_PORT=${REDIS_PORT:-6379}
+      - CONTAINER_NAME=mock-asr
+    profiles:
+      - mock
+    restart: unless-stopped
+
+networks:
+  default:
+    name: asr-network
