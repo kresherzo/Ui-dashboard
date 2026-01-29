@@ -1087,6 +1087,545 @@ async def stop_via_portainer(
         return {"status": "error", "message": str(e)}
 
 
+# ============ TOKENS API (Kalshi/Polymarket) ============
+
+import requests
+from bs4 import BeautifulSoup
+import re
+
+def fetch_kalshi_events(filter_text: str = None):
+    """Fetch trending Mentions events from Kalshi API."""
+    url = "https://api.elections.kalshi.com/v1/search/series?order_by=trending&status=open%2Cunopened&category=Mentions&page_size=50&with_milestones=true"
+    
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        series_list = data.get('current_page', [])
+        events = []
+        
+        for series in series_list:
+            title = series.get('event_title', series.get('series_title', ''))
+            
+            # Apply filter
+            if filter_text and filter_text.lower() not in title.lower():
+                continue
+            
+            events.append({
+                "id": series.get('series_ticker', ''),
+                "title": title,
+                "source": "kalshi",
+                "data": series
+            })
+        
+        return events
+    except Exception as e:
+        print(f"Kalshi API error: {e}")
+        return []
+
+
+def get_polymarket_build_id():
+    """Get current Polymarket build ID."""
+    try:
+        url = "https://polymarket.com/mentions"
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        match = re.search(r'"buildId":"([^"]+)"', response.text)
+        if match:
+            return match.group(1)
+        return None
+    except Exception as e:
+        print(f"Polymarket build ID error: {e}")
+        return None
+
+
+def fetch_polymarket_events(filter_text: str = None):
+    """Fetch trending Mentions events from Polymarket using gamma API."""
+    try:
+        print("[POLYMARKET] Fetching events from gamma API...")
+        url = "https://gamma-api.polymarket.com/events?closed=false&tag=mentions&limit=50"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        events_list = response.json()
+        
+        print(f"[POLYMARKET] Got {len(events_list)} events")
+        
+        events = []
+        for event in events_list:
+            title = event.get('title', '')
+            
+            # Apply filter
+            if filter_text and filter_text.lower() not in title.lower():
+                continue
+            
+            events.append({
+                "id": event.get('slug', ''),
+                "title": title,
+                "source": "polymarket",
+                "data": event
+            })
+        
+        print(f"[POLYMARKET] Returning {len(events)} events after filter")
+        return events
+    except Exception as e:
+        print(f"Polymarket API error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def fetch_kalshi_event_markets(series_ticker: str):
+    """Fetch markets for a Kalshi event."""
+    url = f"https://api.elections.kalshi.com/v1/events/?series_ticker={series_ticker}"
+    
+    try:
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        events = data.get('events', [])
+        all_markets = []
+        
+        for event in events:
+            markets = event.get('markets', [])
+            event_ticker = event.get('event_ticker', '')
+            
+            for market in markets:
+                if market.get('status') == 'finalized':
+                    continue
+                
+                ticker_name = market.get('ticker_name', '')
+                custom_strike = market.get('custom_strike', {})
+                
+                if isinstance(custom_strike, dict):
+                    word = custom_strike.get('Word', '')
+                elif isinstance(custom_strike, str):
+                    word = custom_strike
+                else:
+                    word = market.get('yes_subtitle', '')
+                
+                if not ticker_name or not word:
+                    continue
+                
+                # Parse count
+                match = re.match(r'^(.*?)\s*\((\d+)\+\s*times?\)$', word, re.IGNORECASE)
+                if match:
+                    word_clean = match.group(1).strip().lower()
+                    count = int(match.group(2))
+                else:
+                    word_clean = word.strip().lower()
+                    count = 1
+                
+                all_markets.append({
+                    "word": word_clean,
+                    "count": count,
+                    "token_id": ticker_name,
+                    "source": event_ticker
+                })
+        
+        return all_markets
+    except Exception as e:
+        print(f"Kalshi markets error: {e}")
+        return []
+
+
+def fetch_polymarket_event_markets(slug: str):
+    """Fetch markets for a Polymarket event using gamma API."""
+    try:
+        print(f"[POLYMARKET] Fetching markets for slug: {slug}")
+        
+        # Use gamma API to get event details
+        url = f"https://gamma-api.polymarket.com/events?slug={slug}"
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        events = response.json()
+        
+        print(f"[POLYMARKET] Got {len(events)} events from API")
+        
+        if not events:
+            return []
+        
+        event = events[0]  # Get first matching event
+        markets = event.get('markets', [])
+        
+        print(f"[POLYMARKET] Event has {len(markets)} markets")
+        
+        all_markets = []
+        pattern = r'["\u201c]([^"\u201d]+)["\u201d]'
+        
+        for market in markets:
+            # Skip resolved markets
+            if market.get('closed', False):
+                continue
+            
+            question = market.get('question', '')
+            
+            # Get token_id - try multiple fields
+            token_id = None
+            
+            # Try conditionId first (unique identifier)
+            if market.get('conditionId'):
+                token_id = market.get('conditionId')
+            # Try id
+            elif market.get('id'):
+                token_id = market.get('id')
+            # Try clobTokenIds (may be string or array)
+            elif market.get('clobTokenIds'):
+                clob = market.get('clobTokenIds')
+                if isinstance(clob, list) and len(clob) > 0:
+                    token_id = clob[0]
+                elif isinstance(clob, str):
+                    # Try to parse as JSON
+                    try:
+                        parsed = json.loads(clob)
+                        if isinstance(parsed, list) and len(parsed) > 0:
+                            token_id = parsed[0]
+                    except:
+                        pass
+            
+            print(f"[POLYMARKET] Market: {question[:50]}... token_id: {token_id}")
+            
+            if not token_id:
+                continue
+            
+            # Extract words from question
+            matches = re.findall(pattern, question)
+            
+            if not matches:
+                # Fallback - use question start
+                all_markets.append({
+                    "word": question[:30],
+                    "count": 1,
+                    "token_id": token_id,
+                    "source": slug
+                })
+                continue
+            
+            words = []
+            for match in matches:
+                match = match.strip().lower()
+                if match and match not in ['or', 'and', ',', '/']:
+                    match = re.sub(r'\s+or\s+', '/', match, flags=re.IGNORECASE)
+                    match = re.sub(r'\s*/\s*', '/', match)
+                    words.extend(w.strip() for w in match.split('/') if w.strip())
+            
+            if not words:
+                all_markets.append({
+                    "word": question[:30],
+                    "count": 1,
+                    "token_id": token_id,
+                    "source": slug
+                })
+                continue
+            
+            # Extract count
+            count_match = re.search(r'(\d+)\s*(?:times|\+)', question)
+            count = int(count_match.group(1)) if count_match else 1
+            
+            all_markets.append({
+                "word": '/'.join(words),
+                "count": count,
+                "token_id": token_id,
+                "source": slug
+            })
+        
+        print(f"[POLYMARKET] Returning {len(all_markets)} markets")
+        return all_markets
+    except Exception as e:
+        print(f"Polymarket markets error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+@app.get("/api/market-events")
+def get_token_events(
+    source: str = Query("both", description="kalshi, polymarket, or both"),
+    filter: str = Query(None, description="Filter by title")
+):
+    """Get list of events from Kalshi and/or Polymarket."""
+    events = []
+    
+    if source in ["kalshi", "both"]:
+        events.extend(fetch_kalshi_events(filter))
+    
+    if source in ["polymarket", "both"]:
+        events.extend(fetch_polymarket_events(filter))
+    
+    return {"events": events, "count": len(events)}
+
+
+@app.get("/api/market-events/{source}/{event_id:path}")
+def get_event_markets(source: str, event_id: str):
+    """Get markets (tokens) for a specific event."""
+    if source == "kalshi":
+        markets = fetch_kalshi_event_markets(event_id)
+    elif source == "polymarket":
+        markets = fetch_polymarket_event_markets(event_id)
+    else:
+        return {"error": "Invalid source"}
+    
+    return {"markets": markets, "count": len(markets)}
+
+
+class TokensSaveRequest(BaseModel):
+    events: List[dict]  # [{source, id}, ...]
+
+
+@app.post("/api/market-events/save")
+def save_tokens_to_redis(request: TokensSaveRequest):
+    """Fetch markets for selected events and save to Redis."""
+    r = get_redis()
+    
+    all_tokens = []
+    
+    for event in request.events:
+        source = event.get("source")
+        event_id = event.get("id")
+        
+        print(f"[SAVE] Processing event: {source} / {event_id}")
+        
+        if source == "kalshi":
+            markets = fetch_kalshi_event_markets(event_id)
+        elif source == "polymarket":
+            markets = fetch_polymarket_event_markets(event_id)
+        else:
+            print(f"[SAVE] Unknown source: {source}")
+            continue
+        
+        print(f"[SAVE] Found {len(markets)} markets")
+        all_tokens.extend(markets)
+    
+    # Save to Redis in same format as customer: token_id -> "1"
+    saved = 0
+    for token in all_tokens:
+        token_id = token.get("token_id")
+        if token_id:
+            # Format: TOKEN_ID -> "1" (same as customer's data)
+            r.hset("tokens", token_id, "1")
+            # Also save full info for Dashboard display
+            r.hset("tokens_info", token_id, json.dumps(token))
+            saved += 1
+            print(f"[SAVE] Saved: {token_id} ({token.get('word', 'no word')})")
+    
+    return {"status": "success", "saved": saved, "total": len(all_tokens)}
+
+
+@app.get("/api/market-events/saved")
+def get_saved_tokens():
+    """Get all tokens saved in Redis with full info."""
+    r = get_redis()
+    
+    # Try to get from tokens_info first (has full data)
+    tokens_info = r.hgetall("tokens_info")
+    
+    result = []
+    
+    if tokens_info:
+        # Use tokens_info (new format with full data)
+        for token_id, data in tokens_info.items():
+            try:
+                parsed = json.loads(data)
+                parsed["token_id"] = token_id
+                result.append(parsed)
+            except:
+                result.append({
+                    "token_id": token_id,
+                    "word": "",
+                    "count": 1,
+                    "source": ""
+                })
+    else:
+        # Fallback to tokens (old format, just "1")
+        tokens = r.hgetall("tokens")
+        for token_id, data in tokens.items():
+            result.append({
+                "token_id": token_id,
+                "word": "",
+                "count": data,
+                "source": ""
+            })
+    
+    return {"tokens": result, "count": len(result)}
+
+
+@app.delete("/api/market-events/clear")
+def clear_tokens():
+    """Clear all tokens from Redis."""
+    r = get_redis()
+    r.delete("tokens")
+    r.delete("tokens_info")
+    return {"status": "success", "message": "Tokens cleared"}
+
+
+@app.get("/api/exchange-orderbook/{source}/{token_id:path}")
+def get_exchange_orderbook(source: str, token_id: str):
+    """Fetch orderbook directly from Kalshi or Polymarket exchange."""
+    try:
+        if source == "kalshi":
+            # Kalshi API - token_id is the ticker like KXTRUMPSAY-26FEB02-COOK
+            url = f"https://api.elections.kalshi.com/trade-api/v2/markets/{token_id}/orderbook"
+            print(f"[ORDERBOOK] Fetching Kalshi: {url}")
+            
+            response = requests.get(url, timeout=10)
+            print(f"[ORDERBOOK] Kalshi response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                return {"error": "Market not found", "bids": [], "asks": []}
+            
+            response.raise_for_status()
+            data = response.json()
+            print(f"[ORDERBOOK] Kalshi data keys: {data.keys() if isinstance(data, dict) else 'not dict'}")
+            
+            orderbook = data.get('orderbook', {}) or {}
+            print(f"[ORDERBOOK] Kalshi orderbook keys: {orderbook.keys() if isinstance(orderbook, dict) else type(orderbook)}")
+            
+            # Parse Kalshi format - handle both dict and list formats
+            bids = []
+            asks = []
+            
+            yes_book = orderbook.get('yes') or []
+            no_book = orderbook.get('no') or []
+            
+            print(f"[ORDERBOOK] yes_book type: {type(yes_book)}, len: {len(yes_book) if hasattr(yes_book, '__len__') else 'N/A'}")
+            if yes_book:
+                print(f"[ORDERBOOK] yes_book[0] type: {type(yes_book[0]) if isinstance(yes_book, list) and len(yes_book) > 0 else 'N/A'}")
+                print(f"[ORDERBOOK] yes_book sample: {yes_book[:2] if isinstance(yes_book, list) else yes_book}")
+            
+            # Kalshi format: yes/no are lists of [price, size] pairs
+            if isinstance(yes_book, list):
+                for item in yes_book:
+                    if isinstance(item, list) and len(item) >= 2:
+                        # Format: [price, size]
+                        price = int(item[0])
+                        size = int(item[1])
+                        bids.append({"price": price, "size": size})
+                    elif isinstance(item, dict):
+                        bids.append({"price": int(item.get('price', 0)), "size": item.get('size', 0)})
+            elif isinstance(yes_book, dict):
+                for price_str, size in yes_book.items():
+                    price = int(price_str)
+                    bids.append({"price": price, "size": size})
+            
+            if isinstance(no_book, list):
+                for item in no_book:
+                    if isinstance(item, list) and len(item) >= 2:
+                        # Format: [price, size] - convert no price to yes ask
+                        price = int(item[0])
+                        size = int(item[1])
+                        asks.append({"price": 100 - price, "size": size})
+                    elif isinstance(item, dict):
+                        asks.append({"price": 100 - int(item.get('price', 0)), "size": item.get('size', 0)})
+            elif isinstance(no_book, dict):
+                for price_str, size in no_book.items():
+                    price = int(price_str)
+                    asks.append({"price": 100 - price, "size": size})
+            
+            # Sort: bids descending, asks ascending
+            bids.sort(key=lambda x: x['price'], reverse=True)
+            asks.sort(key=lambda x: x['price'])
+            
+            best_bid = bids[0]['price'] if bids else 0
+            best_ask = asks[0]['price'] if asks else 100
+            
+            print(f"[ORDERBOOK] Parsed {len(bids)} bids, {len(asks)} asks")
+            
+            return {
+                "source": "kalshi",
+                "token_id": token_id,
+                "bids": bids[:10],
+                "asks": asks[:10],
+                "best_bid": best_bid,
+                "best_ask": best_ask
+            }
+            
+        elif source == "polymarket":
+            # Polymarket CLOB API - try gamma API first for market info
+            print(f"[ORDERBOOK] Fetching Polymarket for token: {token_id[:50]}...")
+            
+            # Try CLOB API
+            clob_url = f"https://clob.polymarket.com/book?token_id={token_id}"
+            print(f"[ORDERBOOK] Trying CLOB: {clob_url}")
+            
+            response = requests.get(clob_url, timeout=10)
+            print(f"[ORDERBOOK] CLOB response status: {response.status_code}")
+            
+            if response.status_code == 200:
+                data = response.json()
+                print(f"[ORDERBOOK] CLOB data keys: {data.keys() if isinstance(data, dict) else type(data)}")
+                
+                bids = []
+                asks = []
+                
+                for bid in (data.get('bids') or []):
+                    price = float(bid.get('price', 0)) * 100
+                    size = float(bid.get('size', 0))
+                    bids.append({"price": int(price), "size": int(size)})
+                
+                for ask in (data.get('asks') or []):
+                    price = float(ask.get('price', 0)) * 100
+                    size = float(ask.get('size', 0))
+                    asks.append({"price": int(price), "size": int(size)})
+                
+                bids.sort(key=lambda x: x['price'], reverse=True)
+                asks.sort(key=lambda x: x['price'])
+                
+                best_bid = bids[0]['price'] if bids else 0
+                best_ask = asks[0]['price'] if asks else 100
+                
+                return {
+                    "source": "polymarket",
+                    "token_id": token_id,
+                    "bids": bids[:10],
+                    "asks": asks[:10],
+                    "best_bid": best_bid,
+                    "best_ask": best_ask
+                }
+            
+            # If CLOB fails, try gamma API
+            gamma_url = f"https://gamma-api.polymarket.com/markets?clob_token_ids={token_id}"
+            print(f"[ORDERBOOK] Trying Gamma: {gamma_url}")
+            
+            response = requests.get(gamma_url, timeout=10)
+            
+            if response.status_code == 200:
+                markets = response.json()
+                if markets and len(markets) > 0:
+                    market = markets[0]
+                    # Get best bid/ask from market data
+                    best_bid = int(float(market.get('bestBid', 0)) * 100)
+                    best_ask = int(float(market.get('bestAsk', 0)) * 100)
+                    
+                    return {
+                        "source": "polymarket",
+                        "token_id": token_id,
+                        "bids": [{"price": best_bid, "size": 0}] if best_bid else [],
+                        "asks": [{"price": best_ask, "size": 0}] if best_ask else [],
+                        "best_bid": best_bid,
+                        "best_ask": best_ask,
+                        "market_info": {
+                            "question": market.get('question', ''),
+                            "outcomePrices": market.get('outcomePrices', '')
+                        }
+                    }
+            
+            return {"error": "Market not found", "bids": [], "asks": []}
+        else:
+            return {"error": f"Unknown source: {source}"}
+            
+    except requests.exceptions.RequestException as e:
+        print(f"[ORDERBOOK] Request error: {e}")
+        return {"error": str(e), "bids": [], "asks": []}
+    except Exception as e:
+        print(f"[ORDERBOOK] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return {"error": str(e), "bids": [], "asks": []}
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)

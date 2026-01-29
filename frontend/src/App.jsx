@@ -1590,6 +1590,493 @@ function ModuleLauncher() {
   );
 }
 
+// Exchange Orderbook viewer - loads from Kalshi/Polymarket API
+function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmount }) {
+  const [orderbook, setOrderbook] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!tokenId) return;
+    
+    setLoading(true);
+    setError(null);
+    
+    // Determine source from token format
+    const source = tokenId.startsWith('KX') || tokenId.startsWith('kx') ? 'kalshi' : 'polymarket';
+    
+    fetch(`${API_URL}/api/exchange-orderbook/${source}/${encodeURIComponent(tokenId)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.error && data.error !== "Market not found") {
+          setError(data.error);
+          setOrderbook(null);
+        } else {
+          setOrderbook(data);
+        }
+      })
+      .catch(err => {
+        setError(err.message);
+        setOrderbook(null);
+      })
+      .finally(() => setLoading(false));
+  }, [tokenId]);
+
+  if (!tokenId) {
+    return (
+      <div className="h-full flex items-center justify-center text-slate-500">
+        ← Select a token to view orderbook
+      </div>
+    );
+  }
+
+  if (loading) {
+    return <div className="animate-pulse bg-slate-800/30 h-full rounded" />;
+  }
+
+  const bids = orderbook?.bids || [];
+  const asks = orderbook?.asks || [];
+  const bestBid = orderbook?.best_bid || 0;
+  const bestAsk = orderbook?.best_ask || 100;
+  
+  // Calculate profit
+  const calculateProfit = () => {
+    if (!asks.length || !investAmount) return null;
+    const bestAskPrice = bestAsk / 100;
+    const shares = Math.floor(investAmount / bestAskPrice);
+    const cost = shares * bestAskPrice;
+    const ifWins = shares * 1;
+    const profit = ifWins - cost;
+    const roi = cost > 0 ? (profit / cost) * 100 : 0;
+    return { shares, cost, ifWins, profit, roi };
+  };
+  
+  const profit = calculateProfit();
+
+  return (
+    <div className="space-y-4">
+      {/* Token Header */}
+      <div>
+        <h3 className="text-sm font-bold text-cyan-400 break-all">{tokenId}</h3>
+        {tokenInfo?.word && (
+          <p className="text-xs text-slate-400 mt-1">Word: <span className="text-white">{tokenInfo.word}</span></p>
+        )}
+        {tokenInfo?.source && (
+          <p className="text-xs text-slate-400">Source: {tokenInfo.source}</p>
+        )}
+      </div>
+      
+      {/* Price Summary */}
+      <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3">
+        <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Current Price</div>
+        <div className="flex items-center justify-between">
+          <div>
+            <span className="text-2xl font-bold text-white">${(bestAsk / 100).toFixed(2)}</span>
+            <span className="text-xs text-slate-500 ml-2">ask</span>
+          </div>
+          <div className="text-right">
+            <span className="text-lg text-emerald-400">${(bestBid / 100).toFixed(2)}</span>
+            <span className="text-xs text-slate-500 ml-2">bid</span>
+          </div>
+        </div>
+        <div className="text-xs text-slate-500 mt-2">
+          Spread: ${((bestAsk - bestBid) / 100).toFixed(2)} ({((bestAsk - bestBid) / bestAsk * 100).toFixed(1)}%)
+        </div>
+      </div>
+      
+      {/* Profit Calculator */}
+      <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3">
+        <div className="text-xs uppercase tracking-wider text-slate-400 mb-3">Profit Calculator</div>
+        
+        <div className="flex items-center gap-2 mb-3">
+          <span className="text-slate-400 text-sm">Invest $</span>
+          <input
+            type="number"
+            value={investAmount}
+            onChange={e => setInvestAmount(parseFloat(e.target.value) || 0)}
+            className="w-24 px-2 py-1 bg-slate-700 border border-slate-600 rounded text-white text-sm"
+          />
+        </div>
+        
+        {profit && (
+          <div className="grid grid-cols-4 gap-2 text-center">
+            <div>
+              <div className="text-xs text-slate-500">Shares</div>
+              <div className="text-sm font-bold text-white">{profit.shares}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">If Wins</div>
+              <div className="text-sm font-bold text-white">${profit.ifWins.toFixed(2)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">Profit</div>
+              <div className={`text-sm font-bold ${profit.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {profit.profit >= 0 ? '+' : ''}${profit.profit.toFixed(2)}
+              </div>
+            </div>
+            <div>
+              <div className="text-xs text-slate-500">ROI</div>
+              <div className={`text-sm font-bold ${profit.roi >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                {profit.roi >= 0 ? '+' : ''}{profit.roi.toFixed(0)}%
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+      
+      {/* Orderbook */}
+      <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3">
+        <div className="text-xs uppercase tracking-wider text-slate-400 mb-3">Orderbook</div>
+        
+        {error ? (
+          <div className="text-sm text-rose-400">{error}</div>
+        ) : !bids.length && !asks.length ? (
+          <div className="text-sm text-slate-500">No orderbook data available</div>
+        ) : (
+          <div className="grid grid-cols-2 gap-4">
+            {/* Asks (Sell) */}
+            <div>
+              <div className="text-xs font-bold text-rose-400 mb-2">ASKS (SELL)</div>
+              <div className="space-y-1">
+                {asks.slice(0, 8).map((ask, i) => (
+                  <div key={i} className="flex justify-between text-xs">
+                    <span className="text-rose-400 font-mono">${(ask.price / 100).toFixed(2)}</span>
+                    <span className="text-slate-400">{ask.size}</span>
+                  </div>
+                ))}
+                {asks.length === 0 && <div className="text-xs text-slate-500">No asks</div>}
+              </div>
+            </div>
+            
+            {/* Bids (Buy) */}
+            <div>
+              <div className="text-xs font-bold text-emerald-400 mb-2">BIDS (BUY)</div>
+              <div className="space-y-1">
+                {bids.slice(0, 8).map((bid, i) => (
+                  <div key={i} className="flex justify-between text-xs">
+                    <span className="text-emerald-400 font-mono">${(bid.price / 100).toFixed(2)}</span>
+                    <span className="text-slate-400">{bid.size}</span>
+                  </div>
+                ))}
+                {bids.length === 0 && <div className="text-xs text-slate-500">No bids</div>}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Tokens Manager - Kalshi/Polymarket events
+function TokensManager() {
+  const [source, setSource] = useState("both");
+  const [filter, setFilter] = useState("");
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selected, setSelected] = useState(new Set());
+  const [saving, setSaving] = useState(false);
+  const [result, setResult] = useState(null);
+  const [savedTokens, setSavedTokens] = useState([]);
+  const [loadingSaved, setLoadingSaved] = useState(false);
+  const [selectedSavedToken, setSelectedSavedToken] = useState(null);
+  const [investAmount, setInvestAmount] = useState(100);
+
+  // Load events
+  const loadEvents = async () => {
+    setLoading(true);
+    setResult(null);
+    try {
+      const params = new URLSearchParams({ source });
+      if (filter) params.append("filter", filter);
+      
+      const res = await fetch(`${API_URL}/api/market-events?${params}`);
+      const data = await res.json();
+      setEvents(data.events || []);
+      setSelected(new Set());
+    } catch (err) {
+      setResult({ status: "error", message: err.message });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // Load saved tokens
+  const loadSavedTokens = async () => {
+    setLoadingSaved(true);
+    try {
+      const res = await fetch(`${API_URL}/api/market-events/saved`);
+      const data = await res.json();
+      setSavedTokens(data.tokens || []);
+    } catch (err) {
+      console.error("Failed to load saved tokens:", err);
+    } finally {
+      setLoadingSaved(false);
+    }
+  };
+
+  // Save selected to Redis
+  const saveToRedis = async () => {
+    if (selected.size === 0) return;
+    
+    setSaving(true);
+    setResult(null);
+    try {
+      const selectedEvents = events.filter((_, i) => selected.has(i));
+      
+      const res = await fetch(`${API_URL}/api/market-events/save`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          events: selectedEvents.map(e => ({ source: e.source, id: e.id }))
+        })
+      });
+      const data = await res.json();
+      
+      if (data.status === "success") {
+        setResult({ status: "success", message: `Saved ${data.saved} tokens to Redis` });
+        loadSavedTokens();
+      } else {
+        setResult({ status: "error", message: data.message || "Failed to save" });
+      }
+    } catch (err) {
+      setResult({ status: "error", message: err.message });
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  // Clear tokens
+  const clearTokens = async () => {
+    if (!confirm("Clear all tokens from Redis?")) return;
+    
+    try {
+      await fetch(`${API_URL}/api/market-events/clear`, { method: "DELETE" });
+      setSavedTokens([]);
+      setResult({ status: "success", message: "Tokens cleared" });
+    } catch (err) {
+      setResult({ status: "error", message: err.message });
+    }
+  };
+
+  // Toggle selection
+  const toggleSelect = (index) => {
+    const newSelected = new Set(selected);
+    if (newSelected.has(index)) {
+      newSelected.delete(index);
+    } else {
+      newSelected.add(index);
+    }
+    setSelected(newSelected);
+  };
+
+  // Select all
+  const selectAll = () => {
+    if (selected.size === events.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(events.map((_, i) => i)));
+    }
+  };
+
+  // Load saved on mount
+  useEffect(() => {
+    loadSavedTokens();
+  }, []);
+
+  return (
+    <div className="grid grid-cols-12 gap-4">
+      {/* Left: Saved Tokens (like Token Counts in Monitor) */}
+      <div className="col-span-3 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+        <div className="flex justify-between items-center mb-3">
+          <div>
+            <h2 className="text-base font-bold text-white">SAVED TOKENS</h2>
+            <p className="text-xs text-slate-500">{savedTokens.length} tokens</p>
+          </div>
+          <div className="flex gap-1">
+            <button
+              onClick={loadSavedTokens}
+              disabled={loadingSaved}
+              className="p-1.5 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs"
+              title="Refresh"
+            >
+              ↻
+            </button>
+            <button
+              onClick={clearTokens}
+              className="p-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded text-xs"
+              title="Clear All"
+            >
+              ✕
+            </button>
+          </div>
+        </div>
+        
+        <div className="border border-slate-700 rounded-lg overflow-hidden">
+          <div className="bg-slate-800/50 px-2 py-1.5 border-b border-slate-700 grid grid-cols-12 gap-1 text-xs text-slate-400 font-medium">
+            <div className="col-span-8">WORD</div>
+            <div className="col-span-4 text-right">SOURCE</div>
+          </div>
+          
+          <div className="max-h-[calc(100vh-280px)] overflow-y-auto">
+            {savedTokens.length === 0 ? (
+              <div className="p-4 text-center text-slate-500 text-sm">
+                No tokens saved yet.<br/>
+                <span className="text-xs">Add from panel on right →</span>
+              </div>
+            ) : (
+              savedTokens.map((token, i) => (
+                <div
+                  key={token.token_id || i}
+                  onClick={() => setSelectedSavedToken(selectedSavedToken === token.token_id ? null : token)}
+                  className={`px-2 py-2 border-b border-slate-700/50 cursor-pointer transition-colors ${
+                    selectedSavedToken?.token_id === token.token_id 
+                      ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500' 
+                      : 'hover:bg-slate-800/30'
+                  }`}
+                >
+                  <div className="flex justify-between items-center">
+                    <span className="text-cyan-400 text-sm font-medium truncate">
+                      {token.word || token.token_id?.slice(0, 15) || '(no word)'}
+                    </span>
+                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                      token.token_id?.startsWith('KX') 
+                        ? 'bg-purple-500/20 text-purple-400' 
+                        : 'bg-emerald-500/20 text-emerald-400'
+                    }`}>
+                      {token.token_id?.startsWith('KX') ? 'K' : 'P'}
+                    </span>
+                  </div>
+                  <div className="text-xs text-slate-500 truncate mt-0.5">
+                    {token.token_id?.slice(0, 25)}...
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+      
+      {/* Center: Orderbook (like in Monitor) */}
+      <div className="col-span-5 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+        <h2 className="text-xs uppercase tracking-wider text-slate-400 mb-3">ORDERBOOK</h2>
+        <ExchangeOrderbookView 
+          tokenId={selectedSavedToken?.token_id} 
+          tokenInfo={selectedSavedToken}
+          investAmount={investAmount}
+          setInvestAmount={setInvestAmount}
+        />
+      </div>
+      
+      {/* Right: Load Events (compact) */}
+      <div className="col-span-4 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+        <h2 className="text-base font-bold text-white mb-1">ADD TOKENS</h2>
+        <p className="text-xs text-slate-500 mb-3">Fetch from Kalshi/Polymarket</p>
+        
+        {/* Controls */}
+        <div className="flex gap-2 mb-3">
+          <select
+            value={source}
+            onChange={e => setSource(e.target.value)}
+            className="bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-white"
+          >
+            <option value="both">Both</option>
+            <option value="kalshi">Kalshi</option>
+            <option value="polymarket">Polymarket</option>
+          </select>
+          
+          <input
+            type="text"
+            value={filter}
+            onChange={e => setFilter(e.target.value)}
+            placeholder="Filter..."
+            className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-white min-w-0"
+            onKeyDown={e => e.key === "Enter" && loadEvents()}
+          />
+          
+          <button
+            onClick={loadEvents}
+            disabled={loading}
+            className="px-3 py-1.5 bg-blue-500 hover:bg-blue-600 disabled:bg-slate-600 text-white rounded text-xs font-medium"
+          >
+            {loading ? "..." : "Search"}
+          </button>
+        </div>
+        
+        {/* Events list */}
+        <div className="border border-slate-700 rounded-lg overflow-hidden mb-3">
+          <div className="bg-slate-800/50 px-2 py-1.5 flex justify-between items-center border-b border-slate-700">
+            <span className="text-xs text-slate-400">
+              {events.length} found, {selected.size} selected
+            </span>
+            <button
+              onClick={selectAll}
+              className="text-xs text-blue-400 hover:text-blue-300"
+            >
+              {selected.size === events.length ? "None" : "All"}
+            </button>
+          </div>
+          
+          <div className="max-h-[250px] overflow-y-auto">
+            {events.length === 0 ? (
+              <div className="p-3 text-center text-slate-500 text-xs">
+                {loading ? "Loading..." : "Click Search to load events"}
+              </div>
+            ) : (
+              events.map((event, i) => (
+                <div
+                  key={`${event.source}-${event.id}`}
+                  onClick={() => toggleSelect(i)}
+                  className={`px-2 py-1.5 border-b border-slate-700/50 cursor-pointer flex items-center gap-2 hover:bg-slate-800/50 ${
+                    selected.has(i) ? "bg-blue-500/10" : ""
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    checked={selected.has(i)}
+                    onChange={() => {}}
+                    className="rounded bg-slate-700 border-slate-600 w-3 h-3"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-white truncate">{event.title}</div>
+                  </div>
+                  <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    event.source === "kalshi" 
+                      ? "bg-purple-500/20 text-purple-400" 
+                      : "bg-emerald-500/20 text-emerald-400"
+                  }`}>
+                    {event.source === "kalshi" ? "K" : "P"}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+        
+        {/* Save button */}
+        <button
+          onClick={saveToRedis}
+          disabled={saving || selected.size === 0}
+          className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold rounded text-sm"
+        >
+          {saving ? "Saving..." : `Save ${selected.size} to Redis`}
+        </button>
+        
+        {/* Result */}
+        {result && (
+          <div className={`mt-2 p-2 rounded text-xs ${
+            result.status === "success" 
+              ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+              : "bg-rose-500/10 border border-rose-500/20 text-rose-400"
+          }`}>
+            {result.message}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // Main App
 export default function App() {
   const [activeTab, setActiveTab] = useState("monitor");
@@ -1640,6 +2127,7 @@ export default function App() {
             { id: "monitor", label: "Monitor" },
             { id: "streams", label: "Streams" },
             { id: "launch", label: "Launch" },
+            { id: "tokens", label: "Tokens" },
           ].map(tab => (
             <button
               key={tab.id}
@@ -1713,6 +2201,10 @@ export default function App() {
               <ModuleLauncher />
             </div>
           </div>
+        )}
+        
+        {activeTab === "tokens" && (
+          <TokensManager />
         )}
       </main>
       
