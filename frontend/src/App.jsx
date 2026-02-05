@@ -47,11 +47,22 @@ function calculateProfit(asks, investAmount = 100) {
     }
   }
   
+  // Actual amount spent (may be less than investAmount if not enough liquidity)
+  const actualInvested = investAmount - remaining;
   const potentialPayout = totalShares * 1;
-  const profit = potentialPayout - investAmount;
-  const roi = (profit / investAmount) * 100;
+  const profit = potentialPayout - actualInvested;
+  // ROI based on actual invested amount, not requested amount
+  const roi = actualInvested > 0 ? (profit / actualInvested) * 100 : 0;
   
-  return { invested: investAmount, shares: totalShares, payout: potentialPayout, profit, roi };
+  return { 
+    invested: investAmount, 
+    actualInvested,
+    shares: totalShares, 
+    payout: potentialPayout, 
+    profit, 
+    roi,
+    notEnoughLiquidity: remaining > 0
+  };
 }
 
 // API hooks - basic (no auto-refresh)
@@ -412,8 +423,31 @@ function OrderbookView({ tokenId, investAmount, setInvestAmount }) {
           </div>
         </div>
         
-        <div className="text-xs text-slate-500 mt-2 text-center">
-          {orderbook?.timestamp ? new Date(orderbook.timestamp).toLocaleString() : '-'}
+        {/* Slider */}
+        {snapshots.length > 1 && (
+          <div className="mt-3">
+            <input
+              type="range"
+              min="0"
+              max={snapshots.length - 1}
+              value={snapshots.length - 1 - currentIndex}
+              onChange={(e) => setCurrentIndex(snapshots.length - 1 - parseInt(e.target.value))}
+              className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-cyan-500"
+            />
+            <div className="flex justify-between text-xs text-slate-500 mt-1">
+              <span>Oldest</span>
+              <span>Newest</span>
+            </div>
+          </div>
+        )}
+        
+        <div className="text-xs text-slate-500 mt-2 text-center font-mono">
+          {orderbook?.timestamp ? (
+            <>
+              {new Date(orderbook.timestamp).toLocaleString()}
+              <span className="text-slate-600 ml-2">({orderbook.timestamp}ms)</span>
+            </>
+          ) : '-'}
         </div>
       </div>
       
@@ -505,28 +539,35 @@ function OrderbookView({ tokenId, investAmount, setInvestAmount }) {
           />
         </div>
         {profit && (
-          <div className="grid grid-cols-4 gap-3 text-center">
-            <div>
-              <div className="text-xs text-slate-500">Shares</div>
-              <div className="text-lg font-bold text-white font-mono">{profit.shares.toFixed(0)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-slate-500">If Wins</div>
-              <div className="text-lg font-bold text-emerald-400 font-mono">${profit.payout.toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-slate-500">Profit</div>
-              <div className={`text-lg font-bold font-mono ${profit.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {profit.profit >= 0 ? "+" : ""}${profit.profit.toFixed(2)}
+          <>
+            {profit.notEnoughLiquidity && (
+              <div className="mb-3 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                ⚠️ Not enough liquidity. Only ${profit.actualInvested.toFixed(2)} can be spent.
+              </div>
+            )}
+            <div className="grid grid-cols-4 gap-3 text-center">
+              <div>
+                <div className="text-xs text-slate-500">Shares</div>
+                <div className="text-lg font-bold text-white font-mono">{profit.shares.toFixed(0)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">If Wins</div>
+                <div className="text-lg font-bold text-emerald-400 font-mono">${profit.payout.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">Profit</div>
+                <div className={`text-lg font-bold font-mono ${profit.profit >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {profit.profit >= 0 ? "+" : ""}${profit.profit.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">ROI</div>
+                <div className={`text-lg font-bold font-mono ${profit.roi >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
+                  {profit.roi >= 0 ? "+" : ""}{profit.roi.toFixed(0)}%
+                </div>
               </div>
             </div>
-            <div>
-              <div className="text-xs text-slate-500">ROI</div>
-              <div className={`text-lg font-bold font-mono ${profit.roi >= 0 ? "text-emerald-400" : "text-rose-400"}`}>
-                {profit.roi >= 0 ? "+" : ""}{profit.roi.toFixed(0)}%
-              </div>
-            </div>
-          </div>
+          </>
         )}
       </div>
       
@@ -537,7 +578,7 @@ function OrderbookView({ tokenId, investAmount, setInvestAmount }) {
             <span>Asks (Sell)</span>
             <span>{asks.reduce((s, [,q]) => s + parseFloat(q), 0).toLocaleString()}</span>
           </div>
-          <div className="space-y-1 max-h-40 overflow-auto">
+          <div className="space-y-1 max-h-40 overflow-auto flex flex-col-reverse">
             {asks.length === 0 ? (
               <div className="text-slate-500 text-sm italic">No asks</div>
             ) : asks.slice(0, 15).map(([price, qty], i) => {
@@ -639,13 +680,15 @@ function StreamRaces() {
   const formatTime = (timestamp) => {
     if (!timestamp) return '-';
     const date = new Date(timestamp);
-    return date.toLocaleTimeString();
+    const ms = date.getMilliseconds().toString().padStart(3, '0');
+    return `${date.toLocaleTimeString()}.${ms}`;
   };
   
   const formatDateTime = (timestamp) => {
     if (!timestamp) return '-';
     const date = new Date(timestamp);
-    return date.toLocaleString();
+    const ms = date.getMilliseconds().toString().padStart(3, '0');
+    return `${date.toLocaleString()}.${ms}`;
   };
   
   const formatTimeAgo = (timestamp) => {
@@ -660,14 +703,11 @@ function StreamRaces() {
     return 'just now';
   };
   
-  // Format diff_ms nicely
+  // Format diff_ms - always show milliseconds
   const formatDiff = (ms) => {
     const num = Number(ms) || 0;
     if (num === 0) return '0ms';
-    if (num < 1000) return `+${Math.round(num)}ms`;
-    if (num < 60000) return `+${(num / 1000).toFixed(1)}s`;
-    if (num < 3600000) return `+${(num / 60000).toFixed(1)}m`;
-    return `+${(num / 3600000).toFixed(1)}h`;
+    return `+${Math.round(num)}ms`;
   };
   
   // Calculate win stats per container
@@ -787,14 +827,18 @@ function StreamRaces() {
                     
                     return (
                       <div key={i} className="flex items-center gap-2">
-                        <span className="w-6 text-center">{medal}</span>
+                        <span className="w-6 text-center flex-shrink-0">{medal}</span>
                         <span 
-                          className={`w-36 truncate text-sm font-mono ${result.is_fastest ? 'text-emerald-400' : 'text-slate-400'}`}
+                          className={`w-64 flex-shrink-0 text-sm font-mono overflow-hidden text-ellipsis whitespace-nowrap ${result.is_fastest ? 'text-emerald-400' : 'text-slate-400'}`}
+                          style={{direction: 'rtl', textAlign: 'left'}}
                           title={result.container_id}
                         >
                           {result.container_id}
                         </span>
-                        <div className="flex-1 h-5 bg-slate-700 rounded overflow-hidden relative">
+                        <span className="w-32 text-xs text-slate-500 font-mono flex-shrink-0" title={formatDateTime(result.timestamp)}>
+                          {formatTime(result.timestamp)}
+                        </span>
+                        <div className="flex-1 h-6 bg-slate-700 rounded overflow-hidden relative min-w-[200px]">
                           <div 
                             className={`h-full rounded transition-all ${
                               result.is_fastest 
@@ -808,15 +852,12 @@ function StreamRaces() {
                             style={{ width: `${barWidth}%` }}
                           />
                           {/* Diff text inside bar */}
-                          <span className={`absolute inset-0 flex items-center justify-end pr-2 text-xs font-mono font-bold ${
+                          <span className={`absolute inset-0 flex items-center justify-end pr-3 text-xs font-mono font-bold ${
                             result.is_fastest ? 'text-white' : 'text-white/80'
                           }`}>
                             {result.is_fastest ? '⚡ fastest' : formatDiff(result.diff_ms)}
                           </span>
                         </div>
-                        <span className="w-24 text-right text-xs text-slate-600 font-mono" title={formatDateTime(result.timestamp)}>
-                          {formatTime(result.timestamp)}
-                        </span>
                       </div>
                     );
                   })}
@@ -1639,16 +1680,43 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
   const bestBid = orderbook?.best_bid || 0;
   const bestAsk = orderbook?.best_ask || 100;
   
-  // Calculate profit
+  // Calculate profit based on actual liquidity in the orderbook
   const calculateProfit = () => {
     if (!asks.length || !investAmount) return null;
-    const bestAskPrice = bestAsk / 100;
-    const shares = Math.floor(investAmount / bestAskPrice);
-    const cost = shares * bestAskPrice;
-    const ifWins = shares * 1;
-    const profit = ifWins - cost;
-    const roi = cost > 0 ? (profit / cost) * 100 : 0;
-    return { shares, cost, ifWins, profit, roi };
+    
+    let remaining = investAmount;
+    let totalShares = 0;
+    
+    // Walk through asks to see how many shares we can actually buy
+    for (const ask of asks) {
+      const price = ask.price / 100; // Convert cents to dollars
+      const size = parseFloat(ask.size);
+      const cost = price * size;
+      
+      if (remaining >= cost) {
+        totalShares += size;
+        remaining -= cost;
+      } else {
+        totalShares += remaining / price;
+        remaining = 0;
+        break;
+      }
+    }
+    
+    const actualInvested = investAmount - remaining;
+    const ifWins = totalShares * 1;
+    const profit = ifWins - actualInvested;
+    const roi = actualInvested > 0 ? (profit / actualInvested) * 100 : 0;
+    
+    return { 
+      shares: Math.floor(totalShares), 
+      cost: actualInvested, 
+      ifWins, 
+      profit, 
+      roi,
+      notEnoughLiquidity: remaining > 0,
+      actualInvested
+    };
   };
   
   const profit = calculateProfit();
@@ -1699,28 +1767,35 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
         </div>
         
         {profit && (
-          <div className="grid grid-cols-4 gap-2 text-center">
-            <div>
-              <div className="text-xs text-slate-500">Shares</div>
-              <div className="text-sm font-bold text-white">{profit.shares}</div>
-            </div>
-            <div>
-              <div className="text-xs text-slate-500">If Wins</div>
-              <div className="text-sm font-bold text-white">${profit.ifWins.toFixed(2)}</div>
-            </div>
-            <div>
-              <div className="text-xs text-slate-500">Profit</div>
-              <div className={`text-sm font-bold ${profit.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {profit.profit >= 0 ? '+' : ''}${profit.profit.toFixed(2)}
+          <>
+            {profit.notEnoughLiquidity && (
+              <div className="mb-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded px-2 py-1">
+                ⚠️ Only ${profit.actualInvested.toFixed(2)} liquidity available
+              </div>
+            )}
+            <div className="grid grid-cols-4 gap-2 text-center">
+              <div>
+                <div className="text-xs text-slate-500">Shares</div>
+                <div className="text-sm font-bold text-white">{profit.shares}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">If Wins</div>
+                <div className="text-sm font-bold text-white">${profit.ifWins.toFixed(2)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">Profit</div>
+                <div className={`text-sm font-bold ${profit.profit >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {profit.profit >= 0 ? '+' : ''}${profit.profit.toFixed(2)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500">ROI</div>
+                <div className={`text-sm font-bold ${profit.roi >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
+                  {profit.roi >= 0 ? '+' : ''}{profit.roi.toFixed(0)}%
+                </div>
               </div>
             </div>
-            <div>
-              <div className="text-xs text-slate-500">ROI</div>
-              <div className={`text-sm font-bold ${profit.roi >= 0 ? 'text-emerald-400' : 'text-rose-400'}`}>
-                {profit.roi >= 0 ? '+' : ''}{profit.roi.toFixed(0)}%
-              </div>
-            </div>
-          </div>
+          </>
         )}
       </div>
       
@@ -1734,10 +1809,10 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
           <div className="text-sm text-slate-500">No orderbook data available</div>
         ) : (
           <div className="grid grid-cols-2 gap-4">
-            {/* Asks (Sell) */}
+            {/* Asks (Sell) - reversed so lowest price at bottom */}
             <div>
               <div className="text-xs font-bold text-rose-400 mb-2">ASKS (SELL)</div>
-              <div className="space-y-1">
+              <div className="space-y-1 flex flex-col-reverse">
                 {asks.slice(0, 8).map((ask, i) => (
                   <div key={i} className="flex justify-between text-xs">
                     <span className="text-rose-400 font-mono">${(ask.price / 100).toFixed(2)}</span>
@@ -1935,20 +2010,20 @@ function TokensManager() {
                       : 'hover:bg-slate-800/30'
                   }`}
                 >
-                  <div className="flex justify-between items-center">
+                  <div className="flex justify-between items-center gap-2">
                     <span className="text-cyan-400 text-sm font-medium truncate">
                       {token.word || token.token_id?.slice(0, 15) || '(no word)'}
                     </span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded ${
+                    <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
                       token.token_id?.startsWith('KX') 
-                        ? 'bg-purple-500/20 text-purple-400' 
-                        : 'bg-emerald-500/20 text-emerald-400'
+                        ? 'bg-emerald-500/20 text-emerald-400' 
+                        : 'bg-blue-500/20 text-blue-400'
                     }`}>
                       {token.token_id?.startsWith('KX') ? 'K' : 'P'}
                     </span>
                   </div>
-                  <div className="text-xs text-slate-500 truncate mt-0.5">
-                    {token.token_id?.slice(0, 25)}...
+                  <div className="text-xs text-slate-500 mt-0.5 overflow-hidden text-ellipsis" style={{direction: 'rtl', textAlign: 'left'}}>
+                    {token.token_id || ''}
                   </div>
                 </div>
               ))
@@ -2042,8 +2117,8 @@ function TokensManager() {
                   </div>
                   <span className={`text-xs px-1.5 py-0.5 rounded ${
                     event.source === "kalshi" 
-                      ? "bg-purple-500/20 text-purple-400" 
-                      : "bg-emerald-500/20 text-emerald-400"
+                      ? "bg-emerald-500/20 text-emerald-400" 
+                      : "bg-blue-500/20 text-blue-400"
                   }`}>
                     {event.source === "kalshi" ? "K" : "P"}
                   </span>
