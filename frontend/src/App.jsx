@@ -681,14 +681,25 @@ function StreamRaces() {
     if (!timestamp) return '-';
     const date = new Date(timestamp);
     const ms = date.getMilliseconds().toString().padStart(3, '0');
-    return `${date.toLocaleTimeString()}.${ms}`;
+    const hours = date.getHours();
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const hours12 = hours % 12 || 12;
+    return `${hours12}:${minutes}:${seconds}.${ms} ${ampm}`;
   };
   
   const formatDateTime = (timestamp) => {
     if (!timestamp) return '-';
     const date = new Date(timestamp);
     const ms = date.getMilliseconds().toString().padStart(3, '0');
-    return `${date.toLocaleString()}.${ms}`;
+    const hours = date.getHours();
+    const minutes = date.getMinutes().toString().padStart(2, '0');
+    const seconds = date.getSeconds().toString().padStart(2, '0');
+    const ampm = hours >= 12 ? 'PM' : 'AM';
+    const hours12 = hours % 12 || 12;
+    const dateStr = date.toLocaleDateString();
+    return `${dateStr} ${hours12}:${minutes}:${seconds}.${ms} ${ampm}`;
   };
   
   const formatTimeAgo = (timestamp) => {
@@ -1643,17 +1654,41 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
     setLoading(true);
     setError(null);
     
-    // Determine source from token format
-    const source = tokenId.startsWith('KX') || tokenId.startsWith('kx') ? 'kalshi' : 'polymarket';
-    
-    fetch(`${API_URL}/api/exchange-orderbook/${source}/${encodeURIComponent(tokenId)}`)
-      .then(r => r.json())
+    // Fetch from Redis orderbook (not exchange API)
+    fetch(`${API_URL}/api/orderbook/${encodeURIComponent(tokenId)}?history=1`)
+      .then(r => {
+        if (r.status === 404) {
+          return { snapshots: [], notFound: true };
+        }
+        return r.json();
+      })
       .then(data => {
-        if (data.error && data.error !== "Market not found") {
-          setError(data.error);
+        if (data.notFound || !data.snapshots || data.snapshots.length === 0) {
           setOrderbook(null);
+          setError("No orderbook data in Redis. Token may not be tracked yet.");
         } else {
-          setOrderbook(data);
+          // Get latest snapshot and convert format
+          const latest = data.snapshots[0];
+          const asks = (latest.asks || []).map(([price, qty]) => ({ 
+            price: parseFloat(price), 
+            size: parseFloat(qty) 
+          }));
+          const bids = (latest.bids || []).map(([price, qty]) => ({ 
+            price: parseFloat(price), 
+            size: parseFloat(qty) 
+          }));
+          
+          // Sort: asks ascending, bids descending
+          asks.sort((a, b) => a.price - b.price);
+          bids.sort((a, b) => b.price - a.price);
+          
+          setOrderbook({
+            asks,
+            bids,
+            best_ask: asks.length > 0 ? asks[0].price : 100,
+            best_bid: bids.length > 0 ? bids[0].price : 0,
+            timestamp: latest._timestamp
+          });
         }
       })
       .catch(err => {
@@ -1680,6 +1715,20 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
   const bestBid = orderbook?.best_bid || 0;
   const bestAsk = orderbook?.best_ask || 100;
   
+  // Helper to format price (handles both cents and dollars format)
+  const formatPrice = (price) => {
+    const p = parseFloat(price);
+    // If price > 1, assume cents, convert to dollars
+    const dollars = p > 1 ? p / 100 : p;
+    return `$${dollars.toFixed(2)}`;
+  };
+  
+  // Get price in dollars for calculations
+  const toDollars = (price) => {
+    const p = parseFloat(price);
+    return p > 1 ? p / 100 : p;
+  };
+  
   // Calculate profit based on actual liquidity in the orderbook
   const calculateProfit = () => {
     if (!asks.length || !investAmount) return null;
@@ -1689,7 +1738,10 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
     
     // Walk through asks to see how many shares we can actually buy
     for (const ask of asks) {
-      const price = ask.price / 100; // Convert cents to dollars
+      // Price might be in cents (1-100) or dollars (0.01-1.00)
+      // If price > 1, assume cents and convert to dollars
+      const rawPrice = parseFloat(ask.price);
+      const price = rawPrice > 1 ? rawPrice / 100 : rawPrice;
       const size = parseFloat(ask.size);
       const cost = price * size;
       
@@ -1739,16 +1791,16 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
         <div className="text-xs uppercase tracking-wider text-slate-400 mb-2">Current Price</div>
         <div className="flex items-center justify-between">
           <div>
-            <span className="text-2xl font-bold text-white">${(bestAsk / 100).toFixed(2)}</span>
+            <span className="text-2xl font-bold text-white">{formatPrice(bestAsk)}</span>
             <span className="text-xs text-slate-500 ml-2">ask</span>
           </div>
           <div className="text-right">
-            <span className="text-lg text-emerald-400">${(bestBid / 100).toFixed(2)}</span>
+            <span className="text-lg text-emerald-400">{formatPrice(bestBid)}</span>
             <span className="text-xs text-slate-500 ml-2">bid</span>
           </div>
         </div>
         <div className="text-xs text-slate-500 mt-2">
-          Spread: ${((bestAsk - bestBid) / 100).toFixed(2)} ({((bestAsk - bestBid) / bestAsk * 100).toFixed(1)}%)
+          Spread: ${(toDollars(bestAsk) - toDollars(bestBid)).toFixed(2)} ({((toDollars(bestAsk) - toDollars(bestBid)) / toDollars(bestAsk) * 100).toFixed(1)}%)
         </div>
       </div>
       
@@ -1815,7 +1867,7 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
               <div className="space-y-1 flex flex-col-reverse">
                 {asks.slice(0, 8).map((ask, i) => (
                   <div key={i} className="flex justify-between text-xs">
-                    <span className="text-rose-400 font-mono">${(ask.price / 100).toFixed(2)}</span>
+                    <span className="text-rose-400 font-mono">{formatPrice(ask.price)}</span>
                     <span className="text-slate-400">{ask.size}</span>
                   </div>
                 ))}
@@ -1829,7 +1881,7 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
               <div className="space-y-1">
                 {bids.slice(0, 8).map((bid, i) => (
                   <div key={i} className="flex justify-between text-xs">
-                    <span className="text-emerald-400 font-mono">${(bid.price / 100).toFixed(2)}</span>
+                    <span className="text-emerald-400 font-mono">{formatPrice(bid.price)}</span>
                     <span className="text-slate-400">{bid.size}</span>
                   </div>
                 ))}
@@ -1857,17 +1909,21 @@ function TokensManager() {
   const [selectedSavedToken, setSelectedSavedToken] = useState(null);
   const [investAmount, setInvestAmount] = useState(100);
 
-  // Load events
+  // Search tokens directly
   const loadEvents = async () => {
+    if (!filter || filter.trim().length < 2) {
+      setResult({ status: "error", message: "Enter at least 2 characters to search" });
+      return;
+    }
+    
     setLoading(true);
     setResult(null);
     try {
-      const params = new URLSearchParams({ source });
-      if (filter) params.append("filter", filter);
+      const params = new URLSearchParams({ source, q: filter });
       
-      const res = await fetch(`${API_URL}/api/market-events?${params}`);
+      const res = await fetch(`${API_URL}/api/search-tokens?${params}`);
       const data = await res.json();
-      setEvents(data.events || []);
+      setEvents(data.tokens || []);
       setSelected(new Set());
     } catch (err) {
       setResult({ status: "error", message: err.message });
@@ -1890,20 +1946,26 @@ function TokensManager() {
     }
   };
 
-  // Save selected to Redis
+  // Save selected tokens to Redis
   const saveToRedis = async () => {
     if (selected.size === 0) return;
     
     setSaving(true);
     setResult(null);
     try {
-      const selectedEvents = events.filter((_, i) => selected.has(i));
+      const selectedTokens = events.filter((_, i) => selected.has(i));
       
-      const res = await fetch(`${API_URL}/api/market-events/save`, {
+      // Save tokens directly (including event for grouping)
+      const res = await fetch(`${API_URL}/api/market-events/save-tokens`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          events: selectedEvents.map(e => ({ source: e.source, id: e.id }))
+          tokens: selectedTokens.map(t => ({
+            token_id: t.token_id,
+            word: t.title,
+            source: t.source,
+            event: t.event  // Include event name for grouping
+          }))
         })
       });
       const data = await res.json();
@@ -1934,6 +1996,21 @@ function TokensManager() {
     }
   };
 
+  // Delete single token
+  const deleteToken = async (tokenId, e) => {
+    e.stopPropagation(); // Don't trigger row click
+    
+    try {
+      await fetch(`${API_URL}/api/market-events/token/${encodeURIComponent(tokenId)}`, { method: "DELETE" });
+      setSavedTokens(savedTokens.filter(t => t.token_id !== tokenId));
+      if (selectedSavedToken?.token_id === tokenId) {
+        setSelectedSavedToken(null);
+      }
+    } catch (err) {
+      console.error("Delete error:", err);
+    }
+  };
+
   // Toggle selection
   const toggleSelect = (index) => {
     const newSelected = new Set(selected);
@@ -1959,10 +2036,95 @@ function TokensManager() {
     loadSavedTokens();
   }, []);
 
+  // Resizable panel - начальная ширина как col-span-3 (~25%)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
+  const isResizingRef = useRef(false);
+  const panelRef = useRef(null);
+  
+  // Editing state
+  const [editingToken, setEditingToken] = useState(null);
+  const [editValue, setEditValue] = useState("");
+
+  // Resize handlers
+  useEffect(() => {
+    const handleMouseMove = (e) => {
+      if (!isResizingRef.current || !panelRef.current) return;
+      
+      const panelRect = panelRef.current.getBoundingClientRect();
+      const newWidth = e.clientX - panelRect.left;
+      
+      // Ограничения: min 200px, max 50% экрана
+      const clampedWidth = Math.max(200, Math.min(window.innerWidth * 0.5, newWidth));
+      setLeftPanelWidth(clampedWidth);
+    };
+
+    const handleMouseUp = () => {
+      isResizingRef.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      document.removeEventListener('mousemove', handleMouseMove);
+      document.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, []);
+
+  const startResize = (e) => {
+    e.preventDefault();
+    isResizingRef.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  // Update token word in Redis
+  const updateTokenWord = async (tokenId, newWord) => {
+    try {
+      const res = await fetch(`${API_URL}/api/tokens/${encodeURIComponent(tokenId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ word: newWord })
+      });
+      const data = await res.json();
+      if (data.status === "success") {
+        // Update local state
+        setSavedTokens(prev => prev.map(t => 
+          t.token_id === tokenId ? { ...t, word: newWord } : t
+        ));
+      }
+    } catch (err) {
+      console.error("Failed to update token:", err);
+    }
+    setEditingToken(null);
+  };
+
+  // Start editing
+  const startEditing = (token, e) => {
+    e.stopPropagation();
+    setEditingToken(token.token_id);
+    setEditValue(token.word || "");
+  };
+
+  // Handle edit keydown
+  const handleEditKeyDown = (e, tokenId) => {
+    if (e.key === "Enter") {
+      updateTokenWord(tokenId, editValue);
+    } else if (e.key === "Escape") {
+      setEditingToken(null);
+    }
+  };
+
   return (
-    <div className="grid grid-cols-12 gap-4">
-      {/* Left: Saved Tokens (like Token Counts in Monitor) */}
-      <div className="col-span-3 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+    <div className="flex h-[calc(100vh-140px)] gap-2">
+      {/* Left: Saved Tokens - Resizable */}
+      <div 
+        ref={panelRef}
+        className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex-shrink-0"
+        style={{ width: leftPanelWidth }}
+      >
         <div className="flex justify-between items-center mb-3">
           <div>
             <h2 className="text-base font-bold text-white">SAVED TOKENS</h2>
@@ -1988,11 +2150,6 @@ function TokensManager() {
         </div>
         
         <div className="border border-slate-700 rounded-lg overflow-hidden">
-          <div className="bg-slate-800/50 px-2 py-1.5 border-b border-slate-700 grid grid-cols-12 gap-1 text-xs text-slate-400 font-medium">
-            <div className="col-span-8">WORD</div>
-            <div className="col-span-4 text-right">SOURCE</div>
-          </div>
-          
           <div className="max-h-[calc(100vh-280px)] overflow-y-auto">
             {savedTokens.length === 0 ? (
               <div className="p-4 text-center text-slate-500 text-sm">
@@ -2000,40 +2157,179 @@ function TokensManager() {
                 <span className="text-xs">Add from panel on right →</span>
               </div>
             ) : (
-              savedTokens.map((token, i) => (
-                <div
-                  key={token.token_id || i}
-                  onClick={() => setSelectedSavedToken(selectedSavedToken === token.token_id ? null : token)}
-                  className={`px-2 py-2 border-b border-slate-700/50 cursor-pointer transition-colors ${
-                    selectedSavedToken?.token_id === token.token_id 
-                      ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500' 
-                      : 'hover:bg-slate-800/30'
-                  }`}
-                >
-                  <div className="flex justify-between items-center gap-2">
-                    <span className="text-cyan-400 text-sm font-medium truncate">
-                      {token.word || token.token_id?.slice(0, 15) || '(no word)'}
-                    </span>
-                    <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
-                      token.token_id?.startsWith('KX') 
-                        ? 'bg-emerald-500/20 text-emerald-400' 
-                        : 'bg-blue-500/20 text-blue-400'
-                    }`}>
-                      {token.token_id?.startsWith('KX') ? 'K' : 'P'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-500 mt-0.5 overflow-hidden text-ellipsis" style={{direction: 'rtl', textAlign: 'left'}}>
-                    {token.token_id || ''}
-                  </div>
-                </div>
-              ))
+              (() => {
+                // Group ALL tokens by event
+                const kalshiEvents = {};
+                const polymarketEvents = {};
+                
+                savedTokens.forEach(token => {
+                  const isKalshi = token.token_id?.startsWith('KX');
+                  
+                  if (isKalshi) {
+                    // Kalshi: group by event prefix (KXTRUMPSAYMONTH-26FEB01)
+                    const parts = token.token_id?.split('-') || [];
+                    const eventKey = parts.length >= 2 ? `${parts[0]}-${parts[1]}` : 'Other';
+                    if (!kalshiEvents[eventKey]) kalshiEvents[eventKey] = [];
+                    kalshiEvents[eventKey].push(token);
+                  } else {
+                    // Polymarket: group by event field
+                    const eventKey = token.event || 'Other';
+                    if (!polymarketEvents[eventKey]) polymarketEvents[eventKey] = [];
+                    polymarketEvents[eventKey].push(token);
+                  }
+                });
+                
+                return (
+                  <>
+                    {/* Kalshi events */}
+                    {Object.entries(kalshiEvents).map(([eventKey, tokens]) => (
+                      <div key={`k-${eventKey}`}>
+                        {/* Event header */}
+                        <div className="bg-emerald-500/10 px-2 py-1.5 border-b border-slate-700 flex items-center gap-2">
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">K</span>
+                          <span className="text-xs text-emerald-400 font-medium truncate flex-1">{eventKey}</span>
+                          <span className="text-xs text-slate-500">({tokens.length})</span>
+                        </div>
+                        {/* Tokens in event */}
+                        {tokens.map((token, i) => (
+                          <div
+                            key={token.token_id || i}
+                            onClick={() => setSelectedSavedToken(selectedSavedToken?.token_id === token.token_id ? null : token)}
+                            className={`pl-4 pr-2 py-1.5 border-b border-slate-700/30 cursor-pointer transition-colors group ${
+                              selectedSavedToken?.token_id === token.token_id 
+                                ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500' 
+                                : 'hover:bg-slate-800/30'
+                            }`}
+                          >
+                            <div className="flex justify-between items-center gap-1">
+                              {editingToken === token.token_id ? (
+                                <input
+                                  type="text"
+                                  value={editValue}
+                                  onChange={(e) => setEditValue(e.target.value)}
+                                  onKeyDown={(e) => handleEditKeyDown(e, token.token_id)}
+                                  onBlur={() => updateTokenWord(token.token_id, editValue)}
+                                  autoFocus
+                                  className="flex-1 bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 text-sm text-cyan-400 outline-none"
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                              ) : (
+                                <span 
+                                  className="text-cyan-400 text-sm font-medium truncate cursor-text"
+                                  onDoubleClick={(e) => startEditing(token, e)}
+                                  title="Double-click to edit"
+                                >
+                                  {token.word || token.token_id?.split('-').pop() || '(no word)'}
+                                </span>
+                              )}
+                              <div className="flex items-center gap-0.5 flex-shrink-0">
+                                <button
+                                  onClick={(e) => startEditing(token, e)}
+                                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-cyan-400 p-1 transition-opacity"
+                                  title="Edit word"
+                                >
+                                  ✎
+                                </button>
+                                <button
+                                  onClick={(e) => deleteToken(token.token_id, e)}
+                                  className="opacity-0 group-hover:opacity-100 text-rose-400 hover:text-rose-300 p-1 transition-opacity"
+                                  title="Delete token"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </div>
+                            <div className="text-xs text-slate-600 mt-0.5 truncate font-mono" title={token.token_id}>
+                              {token.token_id}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                    
+                    {/* Polymarket events */}
+                    {Object.entries(polymarketEvents).map(([eventKey, tokens]) => (
+                      <div key={`p-${eventKey}`}>
+                        {/* Event header */}
+                        <div className="bg-blue-500/10 px-2 py-1.5 border-b border-slate-700 flex items-center gap-2">
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">P</span>
+                          <span className="text-xs text-blue-400 font-medium truncate flex-1" title={eventKey}>
+                            {eventKey.length > 40 ? eventKey.slice(0, 40) + '...' : eventKey}
+                          </span>
+                          <span className="text-xs text-slate-500">({tokens.length})</span>
+                        </div>
+                        {/* Tokens in event */}
+                        {tokens.map((token, i) => (
+                          <div
+                            key={token.token_id || i}
+                            onClick={() => setSelectedSavedToken(selectedSavedToken?.token_id === token.token_id ? null : token)}
+                            className={`pl-4 pr-2 py-1.5 border-b border-slate-700/30 cursor-pointer transition-colors group ${
+                              selectedSavedToken?.token_id === token.token_id 
+                                ? 'bg-cyan-500/10 border-l-2 border-l-cyan-500' 
+                                : 'hover:bg-slate-800/30'
+                            }`}
+                          >
+                            <div className="flex justify-between items-center gap-1">
+                              {editingToken === token.token_id ? (
+                                <input
+                                  type="text"
+                                  value={editValue}
+                                  onChange={(e) => setEditValue(e.target.value)}
+                                  onKeyDown={(e) => handleEditKeyDown(e, token.token_id)}
+                                  onBlur={() => updateTokenWord(token.token_id, editValue)}
+                                  autoFocus
+                                  className="flex-1 bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 text-sm text-cyan-400 outline-none"
+                                  onClick={(e) => e.stopPropagation()}
+                                />
+                              ) : (
+                                <span 
+                                  className="text-cyan-400 text-sm font-medium truncate cursor-text"
+                                  onDoubleClick={(e) => startEditing(token, e)}
+                                  title="Double-click to edit"
+                                >
+                                  {token.word || '(no word)'}
+                                </span>
+                              )}
+                              <div className="flex items-center gap-0.5 flex-shrink-0">
+                                <button
+                                  onClick={(e) => startEditing(token, e)}
+                                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-cyan-400 p-1 transition-opacity"
+                                  title="Edit word"
+                                >
+                                  ✎
+                                </button>
+                                <button
+                                  onClick={(e) => deleteToken(token.token_id, e)}
+                                  className="opacity-0 group-hover:opacity-100 text-rose-400 hover:text-rose-300 p-1 transition-opacity"
+                                  title="Delete token"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            </div>
+                            <div className="text-xs text-slate-600 mt-0.5 truncate font-mono" title={token.token_id}>
+                              {token.token_id?.slice(0, 30)}...
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    ))}
+                  </>
+                );
+              })()
             )}
           </div>
         </div>
       </div>
       
-      {/* Center: Orderbook (like in Monitor) */}
-      <div className="col-span-5 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+      {/* Resize handle - между панелями */}
+      <div
+        className="w-1 hover:w-2 bg-slate-700 hover:bg-cyan-500/50 cursor-col-resize transition-all flex-shrink-0 rounded-full my-4"
+        onMouseDown={startResize}
+      />
+      
+      {/* Center: Orderbook */}
+      <div className="flex-1 bg-slate-900/50 border border-slate-800 rounded-xl p-4 min-w-[300px] ml-1">
         <h2 className="text-xs uppercase tracking-wider text-slate-400 mb-3">ORDERBOOK</h2>
         <ExchangeOrderbookView 
           tokenId={selectedSavedToken?.token_id} 
@@ -2043,13 +2339,13 @@ function TokensManager() {
         />
       </div>
       
-      {/* Right: Load Events (compact) */}
-      <div className="col-span-4 bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+      {/* Right: Load Events */}
+      <div className="w-[350px] flex-shrink-0 bg-slate-900/50 border border-slate-800 rounded-xl p-4 ml-2">
         <h2 className="text-base font-bold text-white mb-1">ADD TOKENS</h2>
-        <p className="text-xs text-slate-500 mb-3">Fetch from Kalshi/Polymarket</p>
+        <p className="text-xs text-slate-500 mb-3">Search all markets on Kalshi/Polymarket</p>
         
         {/* Controls */}
-        <div className="flex gap-2 mb-3">
+        <div className="flex gap-2 mb-2">
           <select
             value={source}
             onChange={e => setSource(e.target.value)}
@@ -2064,7 +2360,7 @@ function TokensManager() {
             type="text"
             value={filter}
             onChange={e => setFilter(e.target.value)}
-            placeholder="Filter..."
+            placeholder="Search (e.g. trump)"
             className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-white min-w-0"
             onKeyDown={e => e.key === "Enter" && loadEvents()}
           />
@@ -2092,38 +2388,117 @@ function TokensManager() {
             </button>
           </div>
           
-          <div className="max-h-[250px] overflow-y-auto">
+          <div className="max-h-[350px] overflow-y-auto">
             {events.length === 0 ? (
               <div className="p-3 text-center text-slate-500 text-xs">
-                {loading ? "Loading..." : "Click Search to load events"}
+                {loading ? "Loading..." : "Enter search query and click Search"}
               </div>
             ) : (
-              events.map((event, i) => (
-                <div
-                  key={`${event.source}-${event.id}`}
-                  onClick={() => toggleSelect(i)}
-                  className={`px-2 py-1.5 border-b border-slate-700/50 cursor-pointer flex items-center gap-2 hover:bg-slate-800/50 ${
-                    selected.has(i) ? "bg-blue-500/10" : ""
-                  }`}
-                >
-                  <input
-                    type="checkbox"
-                    checked={selected.has(i)}
-                    onChange={() => {}}
-                    className="rounded bg-slate-700 border-slate-600 w-3 h-3"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="text-xs text-white truncate">{event.title}</div>
-                  </div>
-                  <span className={`text-xs px-1.5 py-0.5 rounded ${
-                    event.source === "kalshi" 
-                      ? "bg-emerald-500/20 text-emerald-400" 
-                      : "bg-blue-500/20 text-blue-400"
-                  }`}>
-                    {event.source === "kalshi" ? "K" : "P"}
-                  </span>
-                </div>
-              ))
+              (() => {
+                // Group tokens by event
+                const grouped = {};
+                events.forEach((token, i) => {
+                  const eventKey = token.event || token.title;
+                  if (!grouped[eventKey]) {
+                    grouped[eventKey] = {
+                      event: eventKey,
+                      source: token.source,
+                      tokens: []
+                    };
+                  }
+                  grouped[eventKey].tokens.push({ ...token, originalIndex: i });
+                });
+                
+                // Sort groups - mention events first
+                const mentionKeywords = ['say', 'mention', 'word', 'nickname', 'state of the union'];
+                const sortedGroups = Object.values(grouped).sort((a, b) => {
+                  const aIsMention = mentionKeywords.some(kw => a.event.toLowerCase().includes(kw));
+                  const bIsMention = mentionKeywords.some(kw => b.event.toLowerCase().includes(kw));
+                  if (aIsMention && !bIsMention) return -1;
+                  if (!aIsMention && bIsMention) return 1;
+                  return a.event.localeCompare(b.event);
+                });
+                
+                // Helper to select all tokens in a group
+                const toggleGroupSelect = (group) => {
+                  const indices = group.tokens.map(t => t.originalIndex);
+                  const allSelected = indices.every(i => selected.has(i));
+                  const newSelected = new Set(selected);
+                  if (allSelected) {
+                    indices.forEach(i => newSelected.delete(i));
+                  } else {
+                    indices.forEach(i => newSelected.add(i));
+                  }
+                  setSelected(newSelected);
+                };
+                
+                return sortedGroups.map((group, gi) => {
+                  const groupIndices = group.tokens.map(t => t.originalIndex);
+                  const selectedInGroup = groupIndices.filter(i => selected.has(i)).length;
+                  const isMention = mentionKeywords.some(kw => group.event.toLowerCase().includes(kw));
+                  
+                  return (
+                    <div key={gi} className="border-b border-slate-700">
+                      {/* Event Header */}
+                      <div 
+                        className={`px-2 py-2 flex items-center gap-2 cursor-pointer hover:bg-slate-800/30 ${
+                          isMention ? 'bg-amber-500/5' : 'bg-slate-800/20'
+                        }`}
+                        onClick={() => toggleGroupSelect(group)}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={selectedInGroup === group.tokens.length}
+                          onChange={() => {}}
+                          className="rounded bg-slate-700 border-slate-600 w-3.5 h-3.5"
+                        />
+                        <div className="flex-1 min-w-0">
+                          <div className={`text-xs font-medium truncate ${isMention ? 'text-amber-400' : 'text-slate-300'}`}>
+                            {group.event}
+                          </div>
+                          <div className="text-xs text-slate-500">
+                            {group.tokens.length} token{group.tokens.length > 1 ? 's' : ''} 
+                            {selectedInGroup > 0 && ` • ${selectedInGroup} selected`}
+                          </div>
+                        </div>
+                        <span className={`text-xs px-1.5 py-0.5 rounded flex-shrink-0 ${
+                          group.source === "kalshi" 
+                            ? "bg-emerald-500/20 text-emerald-400" 
+                            : "bg-blue-500/20 text-blue-400"
+                        }`}>
+                          {group.source === "kalshi" ? "K" : "P"}
+                        </span>
+                      </div>
+                      
+                      {/* Tokens in group */}
+                      <div className="bg-slate-900/30">
+                        {group.tokens.map((token) => (
+                          <div
+                            key={token.token_id}
+                            onClick={(e) => { e.stopPropagation(); toggleSelect(token.originalIndex); }}
+                            className={`pl-6 pr-2 py-1 flex items-center gap-2 cursor-pointer hover:bg-slate-800/50 border-t border-slate-700/30 ${
+                              selected.has(token.originalIndex) ? "bg-blue-500/10" : ""
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={selected.has(token.originalIndex)}
+                              onChange={() => {}}
+                              className="rounded bg-slate-700 border-slate-600 w-3 h-3"
+                            />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs text-white truncate" title={token.title}>{token.title}</div>
+                              <div className="text-xs text-slate-600 truncate font-mono" title={token.token_id}>
+                                {token.token_id.length > 30 ? token.token_id.slice(0, 30) + '...' : token.token_id}
+                              </div>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                });
+              })()
             )}
           </div>
         </div>

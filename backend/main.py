@@ -1094,35 +1094,94 @@ from bs4 import BeautifulSoup
 import re
 
 def fetch_kalshi_events(filter_text: str = None):
-    """Fetch trending Mentions events from Kalshi API."""
-    url = "https://api.elections.kalshi.com/v1/search/series?order_by=trending&status=open%2Cunopened&category=Mentions&page_size=50&with_milestones=true"
+    """Fetch events from Kalshi API with proper filtering."""
+    events = []
     
-    try:
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        
-        series_list = data.get('current_page', [])
-        events = []
-        
-        for series in series_list:
-            title = series.get('event_title', series.get('series_title', ''))
-            
-            # Apply filter
-            if filter_text and filter_text.lower() not in title.lower():
-                continue
-            
-            events.append({
-                "id": series.get('series_ticker', ''),
-                "title": title,
-                "source": "kalshi",
-                "data": series
-            })
-        
-        return events
-    except Exception as e:
-        print(f"Kalshi API error: {e}")
+    # If no filter - return empty (user must search for something)
+    if not filter_text or len(filter_text.strip()) < 2:
+        print("[KALSHI] No filter provided, skipping search")
         return []
+    
+    filter_lower = filter_text.lower().strip()
+    print(f"[KALSHI] Searching for: '{filter_lower}'")
+    
+    # Strategy 1: Search all open events and filter by title/ticker
+    try:
+        search_url = "https://api.elections.kalshi.com/trade-api/v2/events?status=open&with_nested_markets=true&limit=200"
+        response = requests.get(search_url, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            for event in data.get('events', []):
+                title = event.get('title', '')
+                ticker = event.get('event_ticker', '')
+                # STRICT filter - must match
+                if filter_lower in title.lower() or filter_lower in ticker.lower():
+                    events.append({
+                        "id": ticker,
+                        "title": title,
+                        "source": "kalshi",
+                        "data": event
+                    })
+            print(f"[KALSHI] Strategy 1 found {len(events)} events")
+    except Exception as e:
+        print(f"[KALSHI] Search API error: {e}")
+    
+    # Strategy 2: Try category Mentions with STRICT filter
+    try:
+        url = "https://api.elections.kalshi.com/v1/search/series?order_by=trending&status=open%2Cunopened&category=Mentions&page_size=50"
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            data = response.json()
+            series_list = data.get('current_page', [])
+            
+            for series in series_list:
+                title = series.get('event_title', series.get('series_title', ''))
+                series_id = series.get('series_ticker', '')
+                
+                # STRICT filter - must match title or ticker
+                if filter_lower not in title.lower() and filter_lower not in series_id.lower():
+                    continue
+                
+                # Avoid duplicates
+                if not any(e['id'] == series_id for e in events):
+                    events.append({
+                        "id": series_id,
+                        "title": title,
+                        "source": "kalshi",
+                        "data": series
+                    })
+            print(f"[KALSHI] Strategy 2 total events: {len(events)}")
+    except Exception as e:
+        print(f"[KALSHI] Category API error: {e}")
+    
+    # Strategy 3: Try direct series pattern based on filter (not hardcoded!)
+    mention_patterns = [
+        f"KX{filter_text.upper()}MENTION",
+        f"KX{filter_text.upper()}SAY",
+        f"KX{filter_text.upper()}SAYMONTH",
+    ]
+    
+    for pattern in mention_patterns:
+        try:
+            url = f"https://api.elections.kalshi.com/trade-api/v2/events?status=open&series_ticker={pattern}&with_nested_markets=true"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                data = response.json()
+                for event in data.get('events', []):
+                    event_id = event.get('event_ticker', '')
+                    title = event.get('title', '')
+                    if not any(e['id'] == event_id for e in events):
+                        events.append({
+                            "id": event_id,
+                            "title": title,
+                            "source": "kalshi",
+                            "data": event
+                        })
+        except Exception as e:
+            print(f"[KALSHI] Series {pattern} error: {e}")
+    
+    print(f"[KALSHI] Total events found: {len(events)}")
+    return events
 
 
 def get_polymarket_build_id():
@@ -1143,93 +1202,240 @@ def get_polymarket_build_id():
 
 
 def fetch_polymarket_events(filter_text: str = None):
-    """Fetch trending Mentions events from Polymarket using gamma API."""
-    try:
-        print("[POLYMARKET] Fetching events from gamma API...")
-        url = "https://gamma-api.polymarket.com/events?closed=false&tag=mentions&limit=50"
-        response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        events_list = response.json()
-        
-        print(f"[POLYMARKET] Got {len(events_list)} events")
-        
-        events = []
-        for event in events_list:
-            title = event.get('title', '')
-            
-            # Apply filter
-            if filter_text and filter_text.lower() not in title.lower():
-                continue
-            
-            events.append({
-                "id": event.get('slug', ''),
-                "title": title,
-                "source": "polymarket",
-                "data": event
-            })
-        
-        print(f"[POLYMARKET] Returning {len(events)} events after filter")
-        return events
-    except Exception as e:
-        print(f"Polymarket API error: {e}")
-        import traceback
-        traceback.print_exc()
+    """Fetch events from Polymarket - search ALL categories with mention priority."""
+    events = []
+    seen_slugs = set()
+    
+    # If no filter - return empty
+    if not filter_text or len(filter_text.strip()) < 2:
+        print("[POLYMARKET] No filter provided, skipping search")
         return []
+    
+    filter_lower = filter_text.lower().strip()
+    print(f"[POLYMARKET] Searching for: '{filter_lower}'")
+    
+    # Strategy 1: Search for MENTION-type events first (what will X say)
+    mention_searches = [
+        f"{filter_text} say",
+        f"{filter_text} mention", 
+        f"{filter_text} word",
+        f"{filter_text} state of the union",
+        f"what will {filter_text}",
+    ]
+    
+    for search_term in mention_searches:
+        try:
+            url = f"https://gamma-api.polymarket.com/events?closed=false&limit=50&title_contains={search_term}"
+            response = requests.get(url, timeout=10)
+            if response.status_code == 200:
+                events_list = response.json()
+                for event in events_list:
+                    title = event.get('title', '')
+                    slug = event.get('slug', '')
+                    if slug and slug not in seen_slugs:
+                        seen_slugs.add(slug)
+                        events.append({
+                            "id": slug,
+                            "title": title,
+                            "source": "polymarket",
+                            "data": event,
+                            "is_mention": True  # Mark as mention event
+                        })
+        except Exception as e:
+            print(f"[POLYMARKET] Mention search '{search_term}' error: {e}")
+    
+    print(f"[POLYMARKET] Found {len(events)} mention events")
+    
+    # Strategy 2: Search ALL events
+    try:
+        url = f"https://gamma-api.polymarket.com/events?closed=false&limit=200"
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            events_list = response.json()
+            print(f"[POLYMARKET] Got {len(events_list)} total events")
+            for event in events_list:
+                title = event.get('title', '')
+                slug = event.get('slug', '')
+                description = event.get('description', '')
+                
+                # STRICT filter - must match title or description
+                search_text = f"{title} {description}".lower()
+                if filter_lower in search_text and slug and slug not in seen_slugs:
+                    seen_slugs.add(slug)
+                    events.append({
+                        "id": slug,
+                        "title": title,
+                        "source": "polymarket",
+                        "data": event,
+                        "is_mention": False
+                    })
+    except Exception as e:
+        print(f"[POLYMARKET] All events error: {e}")
+    
+    # Strategy 3: Direct title search
+    try:
+        url = f"https://gamma-api.polymarket.com/events?closed=false&limit=100&title_contains={filter_text}"
+        response = requests.get(url, timeout=15)
+        if response.status_code == 200:
+            events_list = response.json()
+            for event in events_list:
+                title = event.get('title', '')
+                slug = event.get('slug', '')
+                if filter_lower in title.lower() and slug and slug not in seen_slugs:
+                    seen_slugs.add(slug)
+                    events.append({
+                        "id": slug,
+                        "title": title,
+                        "source": "polymarket",
+                        "data": event,
+                        "is_mention": False
+                    })
+    except Exception as e:
+        print(f"[POLYMARKET] Title search error: {e}")
+    
+    print(f"[POLYMARKET] Total events found: {len(events)}")
+    return events
 
 
 def fetch_kalshi_event_markets(series_ticker: str):
-    """Fetch markets for a Kalshi event."""
-    url = f"https://api.elections.kalshi.com/v1/events/?series_ticker={series_ticker}"
+    """Fetch markets for a Kalshi event - try multiple API endpoints."""
+    all_markets = []
     
+    # Strategy 1: Try v1 series API
     try:
+        url = f"https://api.elections.kalshi.com/v1/events/?series_ticker={series_ticker}"
         response = requests.get(url, timeout=15)
-        response.raise_for_status()
-        data = response.json()
-        
-        events = data.get('events', [])
-        all_markets = []
-        
-        for event in events:
-            markets = event.get('markets', [])
-            event_ticker = event.get('event_ticker', '')
+        if response.status_code == 200:
+            data = response.json()
+            events = data.get('events', [])
             
-            for market in markets:
-                if market.get('status') == 'finalized':
-                    continue
+            for event in events:
+                markets = event.get('markets', [])
+                event_ticker = event.get('event_ticker', '')
                 
-                ticker_name = market.get('ticker_name', '')
-                custom_strike = market.get('custom_strike', {})
-                
-                if isinstance(custom_strike, dict):
-                    word = custom_strike.get('Word', '')
-                elif isinstance(custom_strike, str):
-                    word = custom_strike
-                else:
-                    word = market.get('yes_subtitle', '')
-                
-                if not ticker_name or not word:
-                    continue
-                
-                # Parse count
-                match = re.match(r'^(.*?)\s*\((\d+)\+\s*times?\)$', word, re.IGNORECASE)
-                if match:
-                    word_clean = match.group(1).strip().lower()
-                    count = int(match.group(2))
-                else:
-                    word_clean = word.strip().lower()
-                    count = 1
-                
-                all_markets.append({
-                    "word": word_clean,
-                    "count": count,
-                    "token_id": ticker_name,
-                    "source": event_ticker
-                })
-        
-        return all_markets
+                for market in markets:
+                    if market.get('status') == 'finalized':
+                        continue
+                    
+                    ticker_name = market.get('ticker_name', '')
+                    custom_strike = market.get('custom_strike', {})
+                    
+                    if isinstance(custom_strike, dict):
+                        word = custom_strike.get('Word', '')
+                    elif isinstance(custom_strike, str):
+                        word = custom_strike
+                    else:
+                        word = market.get('yes_subtitle', '')
+                    
+                    if not ticker_name:
+                        continue
+                    
+                    # Use ticker_name as word if word is empty
+                    if not word:
+                        word = ticker_name.split('-')[-1].replace('_YES', '').replace('_NO', '')
+                    
+                    # Parse count
+                    match = re.match(r'^(.*?)\s*\((\d+)\+\s*times?\)$', word, re.IGNORECASE)
+                    if match:
+                        word_clean = match.group(1).strip().lower()
+                        count = int(match.group(2))
+                    else:
+                        word_clean = word.strip().lower()
+                        count = 1
+                    
+                    all_markets.append({
+                        "word": word_clean,
+                        "count": count,
+                        "token_id": ticker_name,
+                        "source": event_ticker
+                    })
     except Exception as e:
-        print(f"Kalshi markets error: {e}")
-        return []
+        print(f"Kalshi v1 API error: {e}")
+    
+    # Strategy 2: Try v2 events API if v1 didn't work well
+    if len(all_markets) == 0:
+        try:
+            url = f"https://api.elections.kalshi.com/trade-api/v2/events/{series_ticker}"
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                event = data.get('event', {})
+                markets = event.get('markets', [])
+                
+                for market in markets:
+                    if market.get('status') == 'finalized':
+                        continue
+                    
+                    ticker = market.get('ticker', '')
+                    title = market.get('title', '')
+                    subtitle = market.get('yes_sub_title', market.get('subtitle', ''))
+                    
+                    if not ticker:
+                        continue
+                    
+                    # Extract word from title/subtitle
+                    word = subtitle if subtitle else title
+                    if not word:
+                        word = ticker.split('-')[-1].replace('_YES', '').replace('_NO', '')
+                    
+                    # Parse count
+                    match = re.match(r'^(.*?)\s*\((\d+)\+\s*times?\)$', word, re.IGNORECASE)
+                    if match:
+                        word_clean = match.group(1).strip().lower()
+                        count = int(match.group(2))
+                    else:
+                        word_clean = word.strip().lower()
+                        count = 1
+                    
+                    all_markets.append({
+                        "word": word_clean,
+                        "count": count,
+                        "token_id": ticker,
+                        "source": series_ticker
+                    })
+        except Exception as e:
+            print(f"Kalshi v2 API error: {e}")
+    
+    # Strategy 3: Try markets list endpoint
+    if len(all_markets) == 0:
+        try:
+            url = f"https://api.elections.kalshi.com/trade-api/v2/markets?event_ticker={series_ticker}&status=open"
+            response = requests.get(url, timeout=15)
+            if response.status_code == 200:
+                data = response.json()
+                markets = data.get('markets', [])
+                
+                for market in markets:
+                    ticker = market.get('ticker', '')
+                    title = market.get('title', '')
+                    subtitle = market.get('yes_sub_title', '')
+                    
+                    if not ticker:
+                        continue
+                    
+                    word = subtitle if subtitle else title
+                    if not word:
+                        word = ticker.split('-')[-1].replace('_YES', '').replace('_NO', '')
+                    
+                    match = re.match(r'^(.*?)\s*\((\d+)\+\s*times?\)$', word, re.IGNORECASE)
+                    if match:
+                        word_clean = match.group(1).strip().lower()
+                        count = int(match.group(2))
+                    else:
+                        word_clean = word.strip().lower()
+                        count = 1
+                    
+                    all_markets.append({
+                        "word": word_clean,
+                        "count": count,
+                        "token_id": ticker,
+                        "source": series_ticker
+                    })
+        except Exception as e:
+            print(f"Kalshi markets API error: {e}")
+    
+    print(f"[KALSHI] Found {len(all_markets)} markets for {series_ticker}")
+    return all_markets
 
 
 def fetch_polymarket_event_markets(slug: str):
@@ -1355,7 +1561,469 @@ def get_token_events(
     if source in ["polymarket", "both"]:
         events.extend(fetch_polymarket_events(filter))
     
+    # Sort events - prioritize "mention" type events (say, mention, word, nickname)
+    mention_keywords = ['say', 'mention', 'word', 'nickname', 'state of the union', 'what will']
+    
+    def get_priority(event):
+        title = event.get('title', '').lower()
+        event_id = event.get('id', '').lower()
+        
+        # Check if marked as mention event
+        if event.get('is_mention'):
+            return 0  # Highest priority
+        
+        # Check for mention keywords in title/id
+        for keyword in mention_keywords:
+            if keyword in title or keyword in event_id:
+                return 1  # High priority
+        return 2  # Lower priority
+    
+    events.sort(key=get_priority)
+    
     return {"events": events, "count": len(events)}
+
+
+def fetch_polymarket_mentions_events(filter_text: str = None):
+    """Fetch ALL Mentions events from Polymarket - EXACTLY like interactive_fetch_tickers.py
+    Filter is applied AFTER fetching, not during."""
+    try:
+        print("[POLYMARKET] Fetching mentions page...")
+        
+        # Get build ID
+        build_id = get_polymarket_build_id()
+        if not build_id:
+            print("[POLYMARKET] Failed to get build ID")
+            return []
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+        
+        # Try JSON endpoint first
+        data = None
+        url = f"https://polymarket.com/_next/data/{build_id}/mentions.json"
+        try:
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            data = response.json()
+            print("[POLYMARKET] Got data from JSON endpoint")
+        except:
+            data = None
+        
+        # If JSON endpoint didn't work, parse HTML directly
+        if not data:
+            from bs4 import BeautifulSoup
+            url = "https://polymarket.com/mentions"
+            response = requests.get(url, headers=headers, timeout=15)
+            response.raise_for_status()
+            
+            soup = BeautifulSoup(response.text, "html.parser")
+            script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+            
+            if not script_tag:
+                print("[POLYMARKET] No __NEXT_DATA__ found in HTML")
+                return []
+            
+            data = json.loads(script_tag.string)
+            print("[POLYMARKET] Parsed HTML page")
+        
+        # Try to extract events using the old structure first
+        queries = data.get('pageProps', {}).get('dehydratedState', {}).get('queries', [])
+        events_list = None
+        
+        if queries and len(queries) > 0:
+            state_data = queries[0].get('state', {}).get('data', {})
+            pages = state_data.get('pages', [])
+            if pages and len(pages) > 0:
+                events_list = pages[0]
+        
+        # If old structure didn't work, try to find events recursively
+        if not events_list:
+            def find_events_recursive(obj, depth=0, max_depth=10):
+                if depth > max_depth:
+                    return None
+                
+                if isinstance(obj, dict):
+                    for key in ['events', 'data', 'pages', 'results', 'items', 'list']:
+                        if key in obj:
+                            value = obj[key]
+                            if isinstance(value, list) and len(value) > 0:
+                                first_item = value[0]
+                                if isinstance(first_item, dict):
+                                    if 'slug' in first_item or 'title' in first_item:
+                                        return value
+                    
+                    for value in obj.values():
+                        result = find_events_recursive(value, depth + 1, max_depth)
+                        if result is not None:
+                            return result
+                            
+                elif isinstance(obj, list):
+                    if len(obj) > 0:
+                        first_item = obj[0]
+                        if isinstance(first_item, dict):
+                            if 'slug' in first_item or 'title' in first_item:
+                                if len(obj) > 1 or ('slug' in first_item and 'title' in first_item):
+                                    return obj
+                        for item in obj:
+                            result = find_events_recursive(item, depth + 1, max_depth)
+                            if result is not None:
+                                return result
+                
+                return None
+            
+            events_list = find_events_recursive(data)
+        
+        if not events_list:
+            print("[POLYMARKET] No events found in response")
+            return []
+        
+        print(f"[POLYMARKET] Found {len(events_list)} total mention events")
+        
+        # Convert to our format and apply filter
+        result = []
+        filter_lower = filter_text.lower() if filter_text else None
+        
+        for event in events_list:
+            title = event.get('title', '')
+            slug = event.get('slug', '')
+            
+            # Apply filter if provided (like filter_events in script)
+            if filter_lower and filter_lower not in title.lower():
+                continue
+            
+            result.append({
+                'title': title,
+                'slug': slug,
+                '_source': 'polymarket'
+            })
+        
+        print(f"[POLYMARKET] After filter '{filter_text}': {len(result)} events")
+        return result
+        
+    except Exception as e:
+        print(f"[POLYMARKET] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return []
+
+
+def fetch_polymarket_event_details(slug: str):
+    """Fetch detailed market data for a Polymarket event."""
+    try:
+        from bs4 import BeautifulSoup
+        url = f"https://polymarket.com/event/{slug}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        soup = BeautifulSoup(response.text, "html.parser")
+        script_tag = soup.find("script", {"id": "__NEXT_DATA__"})
+        
+        if not script_tag:
+            return None
+        
+        data = json.loads(script_tag.string)
+        
+        # Find markets recursively
+        def find_markets_recursive(obj):
+            if isinstance(obj, dict):
+                if 'markets' in obj:
+                    return obj['markets']
+                for value in obj.values():
+                    result = find_markets_recursive(value)
+                    if result is not None:
+                        return result
+            elif isinstance(obj, list):
+                for item in obj:
+                    result = find_markets_recursive(item)
+                    if result is not None:
+                        return result
+            return None
+        
+        return find_markets_recursive(data)
+        
+    except Exception as e:
+        print(f"[POLYMARKET] Event details error for {slug}: {e}")
+        return None
+
+
+def fetch_kalshi_mentions_events(filter_text: str = None):
+    """Fetch Mentions events from Kalshi API."""
+    try:
+        print("[KALSHI] Fetching mentions events...")
+        url = "https://api.elections.kalshi.com/v1/search/series?order_by=trending&status=open%2Cunopened&category=Mentions&page_size=50&with_milestones=true"
+        
+        response = requests.get(url, timeout=15)
+        response.raise_for_status()
+        data = response.json()
+        
+        series_list = data.get('current_page', [])
+        print(f"[KALSHI] Found {len(series_list)} mention events")
+        
+        # Filter by text if provided
+        result = []
+        filter_lower = filter_text.lower() if filter_text else None
+        
+        for series in series_list:
+            title = series.get('event_title', series.get('series_title', ''))
+            event_ticker = series.get('event_ticker', '')
+            
+            if filter_lower and filter_lower not in title.lower() and filter_lower not in event_ticker.lower():
+                continue
+            
+            result.append({
+                'title': title,
+                'event_ticker': event_ticker,
+                'markets': series.get('markets', []),
+                '_source': 'kalshi'
+            })
+        
+        print(f"[KALSHI] After filter: {len(result)} events")
+        return result
+        
+    except Exception as e:
+        print(f"[KALSHI] Error: {e}")
+        return []
+
+
+@app.get("/api/search-tokens")
+def search_tokens(
+    source: str = Query("both", description="kalshi, polymarket, or both"),
+    q: str = Query(..., description="Search query"),
+    mentions_only: bool = Query(False, description="Only return mention/say type events")
+):
+    """Search and return all tokens/markets using same logic as interactive_fetch_tickers.py"""
+    if not q or len(q.strip()) < 2:
+        return {"tokens": [], "count": 0}
+    
+    query = q.strip()
+    mention_keywords = ['say', 'mention', 'word', 'nickname', 'state of the union']
+    
+    print(f"[SEARCH] Searching for: '{query}', mentions_only: {mentions_only}")
+    
+    all_tokens = []
+    all_events = []
+    
+    # Fetch events from both sources
+    if source in ["kalshi", "both"]:
+        kalshi_events = fetch_kalshi_mentions_events(query)
+        all_events.extend(kalshi_events)
+    
+    if source in ["polymarket", "both"]:
+        polymarket_events = fetch_polymarket_mentions_events(query)
+        all_events.extend(polymarket_events)
+    
+    print(f"[SEARCH] Total events found: {len(all_events)}")
+    
+    # Process each event and extract tokens
+    for event in all_events:
+        event_source = event.get('_source')
+        event_title = event.get('title', '')
+        
+        # Apply mentions_only filter
+        if mentions_only:
+            event_text = event_title.lower()
+            if not any(kw in event_text for kw in mention_keywords):
+                continue
+        
+        if event_source == 'kalshi':
+            # Kalshi: markets already in response
+            markets = event.get('markets', [])
+            event_ticker = event.get('event_ticker', '')
+            
+            for market in markets:
+                status = market.get('status')
+                if status and status != 'active':
+                    continue
+                
+                ticker = market.get('ticker', '')
+                custom_strike = market.get('custom_strike', {})
+                
+                if isinstance(custom_strike, dict):
+                    word = custom_strike.get('Word', '')
+                elif isinstance(custom_strike, str):
+                    word = custom_strike
+                else:
+                    word = market.get('yes_subtitle', '')
+                
+                if not ticker:
+                    continue
+                
+                # Parse count from word
+                match = re.match(r'^(.*?)\s*\((\d+)\+\s*times?\)$', word, re.IGNORECASE)
+                if match:
+                    word_clean = match.group(1).strip()
+                    count = int(match.group(2))
+                else:
+                    word_clean = word.strip() if word else ticker.split('-')[-1]
+                    count = 1
+                
+                all_tokens.append({
+                    "token_id": ticker,
+                    "title": word_clean or event_title,
+                    "event": event_title,
+                    "source": "kalshi",
+                    "count": count
+                })
+        
+        elif event_source == 'polymarket':
+            # Polymarket: ALWAYS fetch details for each event (like in script)
+            slug = event.get('slug', '')
+            
+            if not slug:
+                continue
+            
+            print(f"[POLYMARKET] Fetching details for: {slug}")
+            markets = fetch_polymarket_event_details(slug)
+            
+            if not markets:
+                print(f"[POLYMARKET] No markets found for {slug}")
+                continue
+            
+            print(f"[POLYMARKET] Got {len(markets)} markets for {slug}")
+            
+            # Pattern for extracting words in quotes (exactly like script)
+            quote_pattern = r'["\u201c]([^"\u201d]+)["\u201d]'
+            
+            for market in markets:
+                # Check if resolved
+                resolution_data = market.get('resolutionData')
+                if resolution_data and resolution_data.get('status') == "resolved":
+                    continue
+                
+                question = market.get('question', '')
+                clob_token_ids = market.get('clobTokenIds', [])
+                
+                # Get token_id - exactly like script: clob_token_ids[0] if clob_token_ids else None
+                token_id = clob_token_ids[0] if clob_token_ids else None
+                
+                if not token_id or not question:
+                    continue
+                
+                # Extract words in quotes (exactly like script)
+                matches = re.findall(quote_pattern, question)
+                if not matches:
+                    continue
+                
+                all_words = []
+                for match in matches:
+                    match_stripped = match.strip()
+                    if not match_stripped or match_stripped.lower() in ['or', 'and', ',', '/']:
+                        continue
+                    
+                    # Normalize separators (exactly like script)
+                    normalized = match_stripped
+                    normalized = re.sub(r'\s+or\s+', '/', normalized, flags=re.IGNORECASE)
+                    normalized = re.sub(r'\s*/\s*', '/', normalized)
+                    
+                    # Split by /
+                    words_in_match = normalized.split('/')
+                    all_words.extend(word.strip().lower() for word in words_in_match if word.strip())
+                
+                if not all_words:
+                    continue
+                
+                words = '/'.join(all_words)
+                
+                # Extract count from question (exactly like script)
+                count_pattern = r'"([^"]+)".*?(\d+)\s*(?:times|\+)'
+                count_match = re.search(count_pattern, question)
+                count = int(count_match.group(2)) if count_match else 1
+                
+                all_tokens.append({
+                    "token_id": token_id,
+                    "title": words,
+                    "event": event_title,
+                    "source": "polymarket",
+                    "count": count
+                })
+    
+    # Sort - mention events first
+    def get_priority(token):
+        title = token.get('title', '').lower()
+        event = token.get('event', '').lower()
+        text = f"{title} {event}"
+        
+        for keyword in mention_keywords:
+            if keyword in text:
+                return 0
+        return 1
+    
+    all_tokens.sort(key=get_priority)
+    
+    print(f"[SEARCH] Total tokens found: {len(all_tokens)}")
+    return {"tokens": all_tokens, "count": len(all_tokens), "events_count": len(all_events)}
+
+
+class TokensDirectSaveRequest(BaseModel):
+    tokens: List[dict]  # [{token_id, word, source, event}, ...]
+
+
+@app.post("/api/market-events/save-tokens")
+def save_tokens_direct(request: TokensDirectSaveRequest):
+    """Save tokens directly to Redis (without fetching from events)."""
+    r = get_redis()
+    
+    saved = 0
+    for token in request.tokens:
+        token_id = token.get("token_id")
+        word = token.get("word", "")
+        source = token.get("source", "")
+        event = token.get("event", "")  # Save event name for grouping
+        
+        if not token_id:
+            continue
+        
+        print(f"[SAVE] Saving token: {token_id}, event: {event}")
+        
+        r.hset("tokens", token_id, "1")
+        r.hset("tokens_info", token_id, json.dumps({
+            "token_id": token_id,
+            "word": word,
+            "source": source,
+            "event": event  # Include event in saved data
+        }))
+        saved += 1
+    
+    return {"status": "success", "saved": saved}
+
+
+class TokenUpdateRequest(BaseModel):
+    word: str = None
+    event: str = None
+
+
+@app.patch("/api/tokens/{token_id:path}")
+def update_token(token_id: str, request: TokenUpdateRequest):
+    """Update a token's word or event in Redis."""
+    r = get_redis()
+    
+    # Get current token info
+    token_info_raw = r.hget("tokens_info", token_id)
+    if not token_info_raw:
+        return {"status": "error", "message": "Token not found"}
+    
+    try:
+        token_info = json.loads(token_info_raw)
+    except:
+        token_info = {"token_id": token_id}
+    
+    # Update fields
+    if request.word is not None:
+        token_info["word"] = request.word
+    if request.event is not None:
+        token_info["event"] = request.event
+    
+    # Save back
+    r.hset("tokens_info", token_id, json.dumps(token_info))
+    
+    print(f"[UPDATE] Token {token_id}: word='{request.word}'")
+    
+    return {"status": "success", "token_id": token_id, "updated": token_info}
 
 
 @app.get("/api/market-events/{source}/{event_id:path}")
@@ -1450,6 +2118,21 @@ def get_saved_tokens():
             })
     
     return {"tokens": result, "count": len(result)}
+
+
+@app.delete("/api/market-events/token/{token_id:path}")
+def delete_single_token(token_id: str):
+    """Delete a single token from Redis."""
+    r = get_redis()
+    
+    # Remove from tokens hash
+    r.hdel("tokens", token_id)
+    
+    # Remove from tokens_info hash
+    r.hdel("tokens_info", token_id)
+    
+    print(f"[TOKENS] Deleted token: {token_id}")
+    return {"status": "success", "message": f"Token {token_id} deleted"}
 
 
 @app.delete("/api/market-events/clear")
