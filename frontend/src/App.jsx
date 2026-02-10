@@ -2036,8 +2036,8 @@ function TokensManager() {
     loadSavedTokens();
   }, []);
 
-  // Resizable panel - начальная ширина как col-span-3 (~25%)
-  const [leftPanelWidth, setLeftPanelWidth] = useState(280);
+  // Resizable panel - начальная ширина как на скрине (~420px)
+  const [leftPanelWidth, setLeftPanelWidth] = useState(420);
   const isResizingRef = useRef(false);
   const panelRef = useRef(null);
   
@@ -2186,9 +2186,9 @@ function TokensManager() {
                       <div key={`k-${eventKey}`}>
                         {/* Event header */}
                         <div className="bg-emerald-500/10 px-2 py-1.5 border-b border-slate-700 flex items-center gap-2">
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400">K</span>
-                          <span className="text-xs text-emerald-400 font-medium truncate flex-1">{eventKey}</span>
-                          <span className="text-xs text-slate-500">({tokens.length})</span>
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 flex-shrink-0">K</span>
+                          <span className="text-xs text-emerald-400 font-medium flex-1">{eventKey}</span>
+                          <span className="text-xs text-slate-500 flex-shrink-0">({tokens.length})</span>
                         </div>
                         {/* Tokens in event */}
                         {tokens.map((token, i) => (
@@ -2201,46 +2201,50 @@ function TokensManager() {
                                 : 'hover:bg-slate-800/30'
                             }`}
                           >
-                            <div className="flex justify-between items-center gap-1">
-                              {editingToken === token.token_id ? (
-                                <input
-                                  type="text"
-                                  value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  onKeyDown={(e) => handleEditKeyDown(e, token.token_id)}
-                                  onBlur={() => updateTokenWord(token.token_id, editValue)}
-                                  autoFocus
-                                  className="flex-1 bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 text-sm text-cyan-400 outline-none"
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                              ) : (
-                                <span 
-                                  className="text-cyan-400 text-sm font-medium truncate cursor-text"
-                                  onDoubleClick={(e) => startEditing(token, e)}
-                                  title="Double-click to edit"
-                                >
-                                  {token.word || token.token_id?.split('-').pop() || '(no word)'}
-                                </span>
-                              )}
-                              <div className="flex items-center gap-0.5 flex-shrink-0">
+                            <div className="flex justify-between items-center gap-2">
+                              <div className="flex-1 min-w-0">
+                                {editingToken === token.token_id ? (
+                                  <input
+                                    type="text"
+                                    value={editValue}
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    onKeyDown={(e) => handleEditKeyDown(e, token.token_id)}
+                                    onBlur={() => updateTokenWord(token.token_id, editValue)}
+                                    autoFocus
+                                    className="w-full bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 text-sm text-cyan-400 outline-none"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                ) : (
+                                  <div 
+                                    className="cursor-text"
+                                    onDoubleClick={(e) => startEditing(token, e)}
+                                    title="Double-click to edit"
+                                  >
+                                    <div className="text-cyan-400 text-sm font-medium">
+                                      {token.word || token.token_id?.split('-').pop() || '(no word)'}
+                                    </div>
+                                    <div className="text-xs text-slate-600 font-mono break-all">
+                                      {token.token_id}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1 flex-shrink-0">
                                 <button
                                   onClick={(e) => startEditing(token, e)}
-                                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-cyan-400 p-1 transition-opacity"
+                                  className="opacity-0 group-hover:opacity-100 w-7 h-7 flex items-center justify-center rounded border border-slate-600 hover:border-cyan-500 text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-all text-sm"
                                   title="Edit word"
                                 >
                                   ✎
                                 </button>
                                 <button
                                   onClick={(e) => deleteToken(token.token_id, e)}
-                                  className="opacity-0 group-hover:opacity-100 text-rose-400 hover:text-rose-300 p-1 transition-opacity"
+                                  className="opacity-0 group-hover:opacity-100 w-7 h-7 flex items-center justify-center rounded border border-slate-600 hover:border-rose-500 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-all text-sm"
                                   title="Delete token"
                                 >
                                   ×
                                 </button>
                               </div>
-                            </div>
-                            <div className="text-xs text-slate-600 mt-0.5 truncate font-mono" title={token.token_id}>
-                              {token.token_id}
                             </div>
                           </div>
                         ))}
@@ -2252,11 +2256,11 @@ function TokensManager() {
                       <div key={`p-${eventKey}`}>
                         {/* Event header */}
                         <div className="bg-blue-500/10 px-2 py-1.5 border-b border-slate-700 flex items-center gap-2">
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400">P</span>
-                          <span className="text-xs text-blue-400 font-medium truncate flex-1" title={eventKey}>
-                            {eventKey.length > 40 ? eventKey.slice(0, 40) + '...' : eventKey}
+                          <span className="text-xs px-1.5 py-0.5 rounded bg-blue-500/20 text-blue-400 flex-shrink-0">P</span>
+                          <span className="text-xs text-blue-400 font-medium flex-1" title={eventKey}>
+                            {eventKey}
                           </span>
-                          <span className="text-xs text-slate-500">({tokens.length})</span>
+                          <span className="text-xs text-slate-500 flex-shrink-0">({tokens.length})</span>
                         </div>
                         {/* Tokens in event */}
                         {tokens.map((token, i) => (
@@ -2269,46 +2273,50 @@ function TokensManager() {
                                 : 'hover:bg-slate-800/30'
                             }`}
                           >
-                            <div className="flex justify-between items-center gap-1">
-                              {editingToken === token.token_id ? (
-                                <input
-                                  type="text"
-                                  value={editValue}
-                                  onChange={(e) => setEditValue(e.target.value)}
-                                  onKeyDown={(e) => handleEditKeyDown(e, token.token_id)}
-                                  onBlur={() => updateTokenWord(token.token_id, editValue)}
-                                  autoFocus
-                                  className="flex-1 bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 text-sm text-cyan-400 outline-none"
-                                  onClick={(e) => e.stopPropagation()}
-                                />
-                              ) : (
-                                <span 
-                                  className="text-cyan-400 text-sm font-medium truncate cursor-text"
-                                  onDoubleClick={(e) => startEditing(token, e)}
-                                  title="Double-click to edit"
-                                >
-                                  {token.word || '(no word)'}
-                                </span>
-                              )}
-                              <div className="flex items-center gap-0.5 flex-shrink-0">
+                            <div className="flex justify-between items-center gap-2">
+                              <div className="flex-1 min-w-0">
+                                {editingToken === token.token_id ? (
+                                  <input
+                                    type="text"
+                                    value={editValue}
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    onKeyDown={(e) => handleEditKeyDown(e, token.token_id)}
+                                    onBlur={() => updateTokenWord(token.token_id, editValue)}
+                                    autoFocus
+                                    className="w-full bg-slate-800 border border-cyan-500 rounded px-1 py-0.5 text-sm text-cyan-400 outline-none"
+                                    onClick={(e) => e.stopPropagation()}
+                                  />
+                                ) : (
+                                  <div 
+                                    className="cursor-text"
+                                    onDoubleClick={(e) => startEditing(token, e)}
+                                    title="Double-click to edit"
+                                  >
+                                    <div className="text-cyan-400 text-sm font-medium">
+                                      {token.word || '(no word)'}
+                                    </div>
+                                    <div className="text-xs text-slate-600 font-mono break-all">
+                                      {token.token_id}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1 flex-shrink-0">
                                 <button
                                   onClick={(e) => startEditing(token, e)}
-                                  className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-cyan-400 p-1 transition-opacity"
+                                  className="opacity-0 group-hover:opacity-100 w-7 h-7 flex items-center justify-center rounded border border-slate-600 hover:border-cyan-500 text-slate-400 hover:text-cyan-400 hover:bg-cyan-500/10 transition-all text-sm"
                                   title="Edit word"
                                 >
                                   ✎
                                 </button>
                                 <button
                                   onClick={(e) => deleteToken(token.token_id, e)}
-                                  className="opacity-0 group-hover:opacity-100 text-rose-400 hover:text-rose-300 p-1 transition-opacity"
+                                  className="opacity-0 group-hover:opacity-100 w-7 h-7 flex items-center justify-center rounded border border-slate-600 hover:border-rose-500 text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-all text-sm"
                                   title="Delete token"
                                 >
                                   ×
                                 </button>
                               </div>
-                            </div>
-                            <div className="text-xs text-slate-600 mt-0.5 truncate font-mono" title={token.token_id}>
-                              {token.token_id?.slice(0, 30)}...
                             </div>
                           </div>
                         ))}
