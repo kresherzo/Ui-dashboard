@@ -37,13 +37,19 @@ app.add_middleware(
 # Redis connection
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "") or None  # Пустая строка = без пароля
 
 # Docker settings
 ASR_IMAGE = os.getenv("ASR_IMAGE", "asr-module:latest")
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "asr-network")
 
 def get_redis():
-    return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    return redis.Redis(
+        host=REDIS_HOST, 
+        port=REDIS_PORT, 
+        password=REDIS_PASSWORD,
+        decode_responses=True
+    )
 
 def get_docker():
     """Get Docker client if available"""

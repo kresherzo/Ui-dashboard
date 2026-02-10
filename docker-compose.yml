@@ -3,7 +3,8 @@ version: '3.8'
 services:
   # ============ Core Services (auto-start) ============
   
-  # Redis database (можно отключить если используется внешний Redis)
+  # Redis database (только для локального тестирования)
+  # Для production используй внешний Redis заказчика
   redis:
     image: redis:7
     container_name: asr-redis
@@ -14,7 +15,7 @@ services:
     command: redis-server --dir /data --dbfilename dump.rdb --appendonly no --save ""
     restart: unless-stopped
     profiles:
-      - local-redis  # Добавь --profile local-redis чтобы запустить локальный Redis
+      - local-redis  # Запуск: docker-compose --profile local-redis up
 
   # FastAPI backend
   backend:
@@ -25,10 +26,10 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - ASR_IMAGE=asr-module:latest
       - DOCKER_NETWORK=asr-network
     volumes:
-      # Docker socket for container management
       - /var/run/docker.sock:/var/run/docker.sock
     restart: unless-stopped
 
@@ -51,6 +52,7 @@ services:
     environment:
       - REDIS_HOST=${REDIS_HOST:-redis}
       - REDIS_PORT=${REDIS_PORT:-6379}
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-}
       - CONTAINER_NAME=mock-asr
     profiles:
       - mock

@@ -21,6 +21,7 @@ from datetime import datetime
 # Настройки из ENV
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "") or None  # Пустая строка = без пароля
 CONTAINER_NAME = os.getenv("CONTAINER_NAME", "mock-asr")
 
 # Интервал между "детекциями" (секунды)
@@ -86,7 +87,8 @@ def connect_redis():
         try:
             r = redis.Redis(
                 host=REDIS_HOST, 
-                port=REDIS_PORT, 
+                port=REDIS_PORT,
+                password=REDIS_PASSWORD,
                 decode_responses=True,
                 socket_connect_timeout=5
             )
