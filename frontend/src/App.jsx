@@ -1904,10 +1904,13 @@ function TokensManager() {
   const [selected, setSelected] = useState(new Set());
   const [saving, setSaving] = useState(false);
   const [result, setResult] = useState(null);
+  const [tag, setTag] = useState("");  // Tag for batch saving (like --name in fetch_tickers)
   const [savedTokens, setSavedTokens] = useState([]);
   const [loadingSaved, setLoadingSaved] = useState(false);
   const [selectedSavedToken, setSelectedSavedToken] = useState(null);
   const [investAmount, setInvestAmount] = useState(100);
+  const [filterTag, setFilterTag] = useState("");  // Filter saved tokens by tag
+  const [availableTags, setAvailableTags] = useState([]);  // List of tags from Redis
 
   // Search tokens directly
   const loadEvents = async () => {
@@ -1939,6 +1942,15 @@ function TokensManager() {
       const res = await fetch(`${API_URL}/api/market-events/saved`);
       const data = await res.json();
       setSavedTokens(data.tokens || []);
+      
+      // Also load tags
+      try {
+        const tagsRes = await fetch(`${API_URL}/api/tokens/tags`);
+        const tagsData = await tagsRes.json();
+        setAvailableTags(tagsData.tags || []);
+      } catch (err) {
+        console.error("Failed to load tags:", err);
+      }
     } catch (err) {
       console.error("Failed to load saved tokens:", err);
     } finally {
@@ -1955,11 +1967,12 @@ function TokensManager() {
     try {
       const selectedTokens = events.filter((_, i) => selected.has(i));
       
-      // Save tokens directly (including event for grouping)
+      // Save tokens directly (including event for grouping and tag)
       const res = await fetch(`${API_URL}/api/market-events/save-tokens`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          tag: tag.trim(),  // Include tag for batch retrieval
           tokens: selectedTokens.map(t => ({
             token_id: t.token_id,
             word: t.title,
@@ -1971,7 +1984,8 @@ function TokensManager() {
       const data = await res.json();
       
       if (data.status === "success") {
-        setResult({ status: "success", message: `Saved ${data.saved} tokens to Redis` });
+        const tagMsg = tag.trim() ? ` with tag "${tag.trim()}"` : "";
+        setResult({ status: "success", message: `Saved ${data.saved} tokens${tagMsg}` });
         loadSavedTokens();
       } else {
         setResult({ status: "error", message: data.message || "Failed to save" });
@@ -2036,10 +2050,12 @@ function TokensManager() {
     loadSavedTokens();
   }, []);
 
-  // Resizable panel - начальная ширина как на скрине (~420px)
+  // Resizable panels
   const [leftPanelWidth, setLeftPanelWidth] = useState(420);
-  const isResizingRef = useRef(false);
+  const [rightPanelWidth, setRightPanelWidth] = useState(350);
+  const resizingPanelRef = useRef(null); // 'left' or 'right'
   const panelRef = useRef(null);
+  const rightPanelRef = useRef(null);
   
   // Editing state
   const [editingToken, setEditingToken] = useState(null);
@@ -2048,18 +2064,23 @@ function TokensManager() {
   // Resize handlers
   useEffect(() => {
     const handleMouseMove = (e) => {
-      if (!isResizingRef.current || !panelRef.current) return;
+      if (!resizingPanelRef.current) return;
       
-      const panelRect = panelRef.current.getBoundingClientRect();
-      const newWidth = e.clientX - panelRect.left;
-      
-      // Ограничения: min 200px, max 50% экрана
-      const clampedWidth = Math.max(200, Math.min(window.innerWidth * 0.5, newWidth));
-      setLeftPanelWidth(clampedWidth);
+      if (resizingPanelRef.current === 'left' && panelRef.current) {
+        const panelRect = panelRef.current.getBoundingClientRect();
+        const newWidth = e.clientX - panelRect.left;
+        const clampedWidth = Math.max(200, Math.min(window.innerWidth * 0.5, newWidth));
+        setLeftPanelWidth(clampedWidth);
+      } else if (resizingPanelRef.current === 'right' && rightPanelRef.current) {
+        const panelRect = rightPanelRef.current.getBoundingClientRect();
+        const newWidth = panelRect.right - e.clientX;
+        const clampedWidth = Math.max(250, Math.min(500, newWidth));
+        setRightPanelWidth(clampedWidth);
+      }
     };
 
     const handleMouseUp = () => {
-      isResizingRef.current = false;
+      resizingPanelRef.current = null;
       document.body.style.cursor = '';
       document.body.style.userSelect = '';
     };
@@ -2073,9 +2094,16 @@ function TokensManager() {
     };
   }, []);
 
-  const startResize = (e) => {
+  const startResizeLeft = (e) => {
     e.preventDefault();
-    isResizingRef.current = true;
+    resizingPanelRef.current = 'left';
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  };
+
+  const startResizeRight = (e) => {
+    e.preventDefault();
+    resizingPanelRef.current = 'right';
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
   };
@@ -2125,10 +2153,15 @@ function TokensManager() {
         className="bg-slate-900/50 border border-slate-800 rounded-xl p-4 flex-shrink-0"
         style={{ width: leftPanelWidth }}
       >
-        <div className="flex justify-between items-center mb-3">
+        <div className="flex justify-between items-center mb-2">
           <div>
             <h2 className="text-base font-bold text-white">SAVED TOKENS</h2>
-            <p className="text-xs text-slate-500">{savedTokens.length} tokens</p>
+            <p className="text-xs text-slate-500">
+              {filterTag 
+                ? `${savedTokens.filter(t => (t.tag || "") === filterTag).length} / ${savedTokens.length} tokens`
+                : `${savedTokens.length} tokens`
+              }
+            </p>
           </div>
           <div className="flex gap-1">
             <button
@@ -2149,6 +2182,36 @@ function TokensManager() {
           </div>
         </div>
         
+        {/* Tag filter */}
+        {availableTags.length > 0 && (
+          <div className="mb-2 flex flex-wrap gap-1">
+            <button
+              onClick={() => setFilterTag("")}
+              className={`px-2 py-0.5 rounded text-xs font-mono transition-colors ${
+                filterTag === "" 
+                  ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/40" 
+                  : "bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-600"
+              }`}
+            >
+              all
+            </button>
+            {availableTags.map(t => (
+              <button
+                key={t.tag}
+                onClick={() => setFilterTag(filterTag === t.tag ? "" : t.tag)}
+                className={`px-2 py-0.5 rounded text-xs font-mono transition-colors ${
+                  filterTag === t.tag 
+                    ? "bg-amber-500/20 text-amber-400 border border-amber-500/40" 
+                    : "bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-600"
+                }`}
+                title={`${t.count} tokens`}
+              >
+                {t.tag} <span className="text-slate-600">({t.count})</span>
+              </button>
+            ))}
+          </div>
+        )}
+        
         <div className="border border-slate-700 rounded-lg overflow-hidden">
           <div className="max-h-[calc(100vh-280px)] overflow-y-auto">
             {savedTokens.length === 0 ? (
@@ -2158,11 +2221,24 @@ function TokensManager() {
               </div>
             ) : (
               (() => {
+                // Filter by tag if selected
+                const filteredTokens = filterTag 
+                  ? savedTokens.filter(t => (t.tag || "") === filterTag)
+                  : savedTokens;
+                
+                if (filteredTokens.length === 0) {
+                  return (
+                    <div className="p-4 text-center text-slate-500 text-sm">
+                      No tokens with tag "{filterTag}"
+                    </div>
+                  );
+                }
+                
                 // Group ALL tokens by event
                 const kalshiEvents = {};
                 const polymarketEvents = {};
                 
-                savedTokens.forEach(token => {
+                filteredTokens.forEach(token => {
                   const isKalshi = token.token_id?.startsWith('KX');
                   
                   if (isKalshi) {
@@ -2182,13 +2258,23 @@ function TokensManager() {
                 return (
                   <>
                     {/* Kalshi events */}
-                    {Object.entries(kalshiEvents).map(([eventKey, tokens]) => (
+                    {Object.entries(kalshiEvents).map(([eventKey, tokens]) => {
+                      // Собираем слова для отображения в заголовке
+                      const words = tokens.map(t => t.word).filter(w => w).slice(0, 3);
+                      const wordsPreview = words.length > 0 ? words.join(', ') + (tokens.length > 3 ? '...' : '') : '';
+                      
+                      return (
                       <div key={`k-${eventKey}`}>
                         {/* Event header */}
-                        <div className="bg-emerald-500/10 px-2 py-1.5 border-b border-slate-700 flex items-center gap-2">
-                          <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 flex-shrink-0">K</span>
-                          <span className="text-xs text-emerald-400 font-medium flex-1">{eventKey}</span>
-                          <span className="text-xs text-slate-500 flex-shrink-0">({tokens.length})</span>
+                        <div className="bg-emerald-500/10 px-2 py-1.5 border-b border-slate-700">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 flex-shrink-0">K</span>
+                            <span className="text-xs text-emerald-400 font-medium flex-1">{eventKey}</span>
+                            <span className="text-xs text-slate-500 flex-shrink-0">({tokens.length})</span>
+                          </div>
+                          {wordsPreview && (
+                            <div className="text-xs text-slate-500 mt-0.5 ml-6">{wordsPreview}</div>
+                          )}
                         </div>
                         {/* Tokens in event */}
                         {tokens.map((token, i) => (
@@ -2220,8 +2306,13 @@ function TokensManager() {
                                     onDoubleClick={(e) => startEditing(token, e)}
                                     title="Double-click to edit"
                                   >
-                                    <div className="text-cyan-400 text-sm font-medium">
-                                      {token.word || token.token_id?.split('-').pop() || '(no word)'}
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-cyan-400 text-sm font-medium">
+                                        {token.word || token.token_id?.split('-').pop() || '(no word)'}
+                                      </span>
+                                      {token.tag && (
+                                        <span className="text-xs px-1 py-0 rounded bg-amber-500/15 text-amber-500/70 font-mono">{token.tag}</span>
+                                      )}
                                     </div>
                                     <div className="text-xs text-slate-600 font-mono break-all">
                                       {token.token_id}
@@ -2249,7 +2340,7 @@ function TokensManager() {
                           </div>
                         ))}
                       </div>
-                    ))}
+                    )})}
                     
                     {/* Polymarket events */}
                     {Object.entries(polymarketEvents).map(([eventKey, tokens]) => (
@@ -2292,8 +2383,13 @@ function TokensManager() {
                                     onDoubleClick={(e) => startEditing(token, e)}
                                     title="Double-click to edit"
                                   >
-                                    <div className="text-cyan-400 text-sm font-medium">
-                                      {token.word || '(no word)'}
+                                    <div className="flex items-center gap-1.5">
+                                      <span className="text-cyan-400 text-sm font-medium">
+                                        {token.word || '(no word)'}
+                                      </span>
+                                      {token.tag && (
+                                        <span className="text-xs px-1 py-0 rounded bg-amber-500/15 text-amber-500/70 font-mono">{token.tag}</span>
+                                      )}
                                     </div>
                                     <div className="text-xs text-slate-600 font-mono break-all">
                                       {token.token_id}
@@ -2330,14 +2426,14 @@ function TokensManager() {
         </div>
       </div>
       
-      {/* Resize handle - между панелями */}
+      {/* Resize handle - между левой и центральной */}
       <div
         className="w-1 hover:w-2 bg-slate-700 hover:bg-cyan-500/50 cursor-col-resize transition-all flex-shrink-0 rounded-full my-4"
-        onMouseDown={startResize}
+        onMouseDown={startResizeLeft}
       />
       
       {/* Center: Orderbook */}
-      <div className="flex-1 bg-slate-900/50 border border-slate-800 rounded-xl p-4 min-w-[300px] ml-1">
+      <div className="flex-1 bg-slate-900/50 border border-slate-800 rounded-xl p-4 min-w-[300px] mx-1">
         <h2 className="text-xs uppercase tracking-wider text-slate-400 mb-3">ORDERBOOK</h2>
         <ExchangeOrderbookView 
           tokenId={selectedSavedToken?.token_id} 
@@ -2347,8 +2443,18 @@ function TokensManager() {
         />
       </div>
       
+      {/* Resize handle - между центральной и правой */}
+      <div
+        className="w-1 hover:w-2 bg-slate-700 hover:bg-cyan-500/50 cursor-col-resize transition-all flex-shrink-0 rounded-full my-4"
+        onMouseDown={startResizeRight}
+      />
+      
       {/* Right: Load Events */}
-      <div className="w-[350px] flex-shrink-0 bg-slate-900/50 border border-slate-800 rounded-xl p-4 ml-2">
+      <div 
+        ref={rightPanelRef}
+        className="flex-shrink-0 bg-slate-900/50 border border-slate-800 rounded-xl p-4"
+        style={{ width: rightPanelWidth }}
+      >
         <h2 className="text-base font-bold text-white mb-1">ADD TOKENS</h2>
         <p className="text-xs text-slate-500 mb-3">Search all markets on Kalshi/Polymarket</p>
         
@@ -2461,7 +2567,7 @@ function TokensManager() {
                           className="rounded bg-slate-700 border-slate-600 w-3.5 h-3.5"
                         />
                         <div className="flex-1 min-w-0">
-                          <div className={`text-xs font-medium truncate ${isMention ? 'text-amber-400' : 'text-slate-300'}`}>
+                          <div className={`text-xs font-medium ${isMention ? 'text-amber-400' : 'text-slate-300'}`}>
                             {group.event}
                           </div>
                           <div className="text-xs text-slate-500">
@@ -2495,9 +2601,9 @@ function TokensManager() {
                               className="rounded bg-slate-700 border-slate-600 w-3 h-3"
                             />
                             <div className="flex-1 min-w-0">
-                              <div className="text-xs text-white truncate" title={token.title}>{token.title}</div>
-                              <div className="text-xs text-slate-600 truncate font-mono" title={token.token_id}>
-                                {token.token_id.length > 30 ? token.token_id.slice(0, 30) + '...' : token.token_id}
+                              <div className="text-xs text-white" title={token.title}>{token.title}</div>
+                              <div className="text-xs text-slate-600 font-mono break-all" title={token.token_id}>
+                                {token.token_id}
                               </div>
                             </div>
                           </div>
@@ -2511,13 +2617,28 @@ function TokensManager() {
           </div>
         </div>
         
+        {/* Tag input */}
+        <div className="mb-2">
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500 flex-shrink-0">Tag:</span>
+            <input
+              type="text"
+              value={tag}
+              onChange={e => setTag(e.target.value)}
+              placeholder="e.g. trump_jan22 (optional)"
+              className="flex-1 bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-amber-400 placeholder-slate-600 min-w-0 font-mono"
+            />
+          </div>
+          <div className="text-xs text-slate-600 mt-0.5 ml-9">Все токены из этой порции получат этот тег</div>
+        </div>
+        
         {/* Save button */}
         <button
           onClick={saveToRedis}
           disabled={saving || selected.size === 0}
           className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 disabled:bg-slate-600 disabled:cursor-not-allowed text-white font-bold rounded text-sm"
         >
-          {saving ? "Saving..." : `Save ${selected.size} to Redis`}
+          {saving ? "Saving..." : `Save ${selected.size} to Redis${tag.trim() ? ` [${tag.trim()}]` : ''}`}
         </button>
         
         {/* Result */}

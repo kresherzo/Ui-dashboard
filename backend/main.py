@@ -136,6 +136,46 @@ def get_tokens(
     return {"tokens": tokens[:limit], "total": len(tokens)}
 
 
+@app.get("/api/tokens/tags")
+def get_all_tags():
+    """Get list of all unique tags from saved tokens."""
+    r = get_redis()
+    tokens_info = r.hgetall("tokens_info")
+    
+    tags = {}
+    for token_id, data in tokens_info.items():
+        try:
+            parsed = json.loads(data)
+            tag = parsed.get("tag", "")
+            if tag:
+                if tag not in tags:
+                    tags[tag] = 0
+                tags[tag] += 1
+        except:
+            pass
+    
+    return {"tags": [{"tag": t, "count": c} for t, c in sorted(tags.items())]}
+
+
+@app.get("/api/tokens/by-tag/{tag}")
+def get_tokens_by_tag(tag: str):
+    """Get all tokens with a specific tag."""
+    r = get_redis()
+    tokens_info = r.hgetall("tokens_info")
+    
+    result = []
+    for token_id, data in tokens_info.items():
+        try:
+            parsed = json.loads(data)
+            if parsed.get("tag", "") == tag:
+                parsed["token_id"] = token_id
+                result.append(parsed)
+        except:
+            pass
+    
+    return {"tokens": result, "count": len(result), "tag": tag}
+
+
 @app.get("/api/tokens/{token_id}")
 def get_token(token_id: str):
     """Get single token details"""
@@ -1967,12 +2007,15 @@ def search_tokens(
 
 class TokensDirectSaveRequest(BaseModel):
     tokens: List[dict]  # [{token_id, word, source, event}, ...]
+    tag: str = ""  # Optional tag for grouping (like --name in interactive_fetch_tickers.py)
 
 
 @app.post("/api/market-events/save-tokens")
 def save_tokens_direct(request: TokensDirectSaveRequest):
     """Save tokens directly to Redis (without fetching from events)."""
     r = get_redis()
+    
+    tag = request.tag.strip() if request.tag else ""
     
     saved = 0
     for token in request.tokens:
@@ -1984,28 +2027,33 @@ def save_tokens_direct(request: TokensDirectSaveRequest):
         if not token_id:
             continue
         
-        print(f"[SAVE] Saving token: {token_id}, event: {event}")
+        print(f"[SAVE] Saving token: {token_id}, event: {event}, tag: {tag}")
         
         r.hset("tokens", token_id, "1")
         r.hset("tokens_info", token_id, json.dumps({
             "token_id": token_id,
             "word": word,
             "source": source,
-            "event": event  # Include event in saved data
+            "event": event,
+            "tag": tag  # Tag for batch retrieval
         }))
         saved += 1
     
-    return {"status": "success", "saved": saved}
+    if tag:
+        print(f"[SAVE] Saved {saved} tokens with tag '{tag}'")
+    
+    return {"status": "success", "saved": saved, "tag": tag}
 
 
 class TokenUpdateRequest(BaseModel):
     word: str = None
     event: str = None
+    tag: str = None
 
 
 @app.patch("/api/tokens/{token_id:path}")
 def update_token(token_id: str, request: TokenUpdateRequest):
-    """Update a token's word or event in Redis."""
+    """Update a token's word, event, or tag in Redis."""
     r = get_redis()
     
     # Get current token info
@@ -2023,11 +2071,13 @@ def update_token(token_id: str, request: TokenUpdateRequest):
         token_info["word"] = request.word
     if request.event is not None:
         token_info["event"] = request.event
+    if request.tag is not None:
+        token_info["tag"] = request.tag
     
     # Save back
     r.hset("tokens_info", token_id, json.dumps(token_info))
     
-    print(f"[UPDATE] Token {token_id}: word='{request.word}'")
+    print(f"[UPDATE] Token {token_id}: word='{request.word}', tag='{request.tag}'")
     
     return {"status": "success", "token_id": token_id, "updated": token_info}
 
