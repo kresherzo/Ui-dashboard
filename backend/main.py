@@ -6,15 +6,17 @@ Manages Docker containers for ASR modules
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, FileResponse
 from pydantic import BaseModel
 import redis
 import json
 import asyncio
 import os
 import time
+import glob
 from typing import Optional, List
 from datetime import datetime
+from pathlib import Path
 
 # Docker SDK
 try:
@@ -42,6 +44,9 @@ REDIS_PASSWORD = os.getenv("REDIS_PASSWORD", "") or None  # Пустая стр�
 # Docker settings
 ASR_IMAGE = os.getenv("ASR_IMAGE", "asr-module:latest")
 DOCKER_NETWORK = os.getenv("DOCKER_NETWORK", "asr-network")
+
+# Words audio directory
+WORDS_DIR = os.getenv("WORDS_DIR", "/data/words")
 
 def get_redis():
     return redis.Redis(
@@ -2363,6 +2368,76 @@ def get_exchange_orderbook(source: str, token_id: str):
         import traceback
         traceback.print_exc()
         return {"error": str(e), "bids": [], "asks": []}
+
+
+# ============ Words Audio Files ============
+
+@app.get("/api/words")
+def get_words_list():
+    """List all .wav files from the words directory."""
+    words_path = Path(WORDS_DIR)
+    
+    if not words_path.exists():
+        return {"files": [], "count": 0, "error": f"Words directory not found: {WORDS_DIR}"}
+    
+    files = []
+    for wav_file in words_path.rglob("*.wav"):
+        try:
+            stat = wav_file.stat()
+            # Relative path from words dir
+            rel_path = str(wav_file.relative_to(words_path))
+            # Subfolder name (if any)
+            parts = rel_path.replace("\\", "/").split("/")
+            subfolder = parts[0] if len(parts) > 1 else ""
+            
+            files.append({
+                "name": wav_file.name,
+                "path": rel_path.replace("\\", "/"),
+                "subfolder": subfolder,
+                "size": stat.st_size,
+                "modified": stat.st_mtime,
+                "modified_str": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+            })
+        except Exception as e:
+            print(f"[WORDS] Error reading {wav_file}: {e}")
+            continue
+    
+    # Sort by modified time, newest first
+    files.sort(key=lambda x: x["modified"], reverse=True)
+    
+    # Collect unique subfolders
+    subfolders = sorted(set(f["subfolder"] for f in files if f["subfolder"]))
+    
+    print(f"[WORDS] Found {len(files)} wav files in {WORDS_DIR}")
+    return {"files": files, "count": len(files), "subfolders": subfolders}
+
+
+@app.get("/api/words/play/{file_path:path}")
+def play_word_file(file_path: str):
+    """Serve a .wav file for playback."""
+    # Security: prevent path traversal
+    if ".." in file_path:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    full_path = Path(WORDS_DIR) / file_path
+    
+    if not full_path.exists() or not full_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found")
+    
+    if full_path.suffix.lower() != ".wav":
+        raise HTTPException(status_code=400, detail="Only .wav files allowed")
+    
+    # Make sure the resolved path is still inside WORDS_DIR
+    try:
+        full_path.resolve().relative_to(Path(WORDS_DIR).resolve())
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid path")
+    
+    return FileResponse(
+        path=str(full_path),
+        media_type="audio/wav",
+        filename=full_path.name
+    )
 
 
 if __name__ == "__main__":

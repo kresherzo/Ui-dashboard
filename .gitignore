@@ -21,6 +21,10 @@ redis-data/*.rdb
 # OS
 .DS_Store
 Thumbs.db
+
+# Words audio files (test data)
+words/*.wav
+words/**/*.wav
 -e 
 # Environment
 .env

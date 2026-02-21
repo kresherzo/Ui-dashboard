@@ -1895,6 +1895,289 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
   );
 }
 
+// Words Audio Player - listen to detected word audio clips
+function WordsPlayer() {
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [search, setSearch] = useState("");
+  const [filterFolder, setFilterFolder] = useState("");
+  const [subfolders, setSubfolders] = useState([]);
+  const [playingFile, setPlayingFile] = useState(null);
+  const [isPlaying, setIsPlaying] = useState(false);  // actual play/pause state
+  const [error, setError] = useState(null);
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [volume, setVolume] = useState(0.5);  // 0-1, persists across files
+  const audioRef = useRef(null);
+
+  const loadFiles = async (silent = false) => {
+    if (!silent) setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API_URL}/api/words`);
+      const data = await res.json();
+      setFiles(data.files || []);
+      setSubfolders(data.subfolders || []);
+      if (data.error) setError(data.error);
+    } catch (err) {
+      if (!silent) setError(err.message);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    loadFiles();
+  }, []);
+
+  // Auto-refresh silently
+  useEffect(() => {
+    if (!autoRefresh) return;
+    const interval = setInterval(() => {
+      loadFiles(true);
+    }, 5000);
+    return () => clearInterval(interval);
+  }, [autoRefresh]);
+
+  // Apply volume when audio element changes or volume changes
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume;
+    }
+  }, [playingFile, volume]);
+
+  // Filter files
+  const filtered = useMemo(() => {
+    let result = files;
+    if (filterFolder) {
+      result = result.filter(f => f.subfolder === filterFolder);
+    }
+    if (search.trim()) {
+      const q = search.trim().toLowerCase();
+      result = result.filter(f => 
+        f.name.toLowerCase().includes(q) || 
+        f.subfolder.toLowerCase().includes(q) ||
+        f.path.toLowerCase().includes(q)
+      );
+    }
+    return result;
+  }, [files, search, filterFolder]);
+
+  const playFile = (file) => {
+    if (playingFile === file.path) {
+      // Same file - toggle play/pause
+      if (audioRef.current) {
+        if (isPlaying) {
+          audioRef.current.pause();
+        } else {
+          audioRef.current.play();
+        }
+      }
+    } else {
+      // New file - will autoplay via onLoadedData
+      setPlayingFile(file.path);
+      setIsPlaying(true);
+    }
+  };
+
+  const handleVolumeChange = (e) => {
+    const v = parseFloat(e.target.value);
+    setVolume(v);
+    if (audioRef.current) {
+      audioRef.current.volume = v;
+    }
+  };
+
+  const formatSize = (bytes) => {
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  return (
+    <div className="space-y-4">
+      {/* Header */}
+      <div className="bg-slate-900/50 border border-slate-800 rounded-xl p-4">
+        <div className="flex justify-between items-center mb-3">
+          <div>
+            <h2 className="text-lg font-bold text-white">Audio Words</h2>
+            <p className="text-xs text-slate-500">
+              {files.length} files found
+              {filtered.length !== files.length && ` • ${filtered.length} shown`}
+            </p>
+          </div>
+          <div className="flex items-center gap-3">
+            {/* Volume control */}
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs text-slate-500">{volume === 0 ? "🔇" : volume < 0.5 ? "🔉" : "🔊"}</span>
+              <input
+                type="range"
+                min="0"
+                max="1"
+                step="0.05"
+                value={volume}
+                onChange={handleVolumeChange}
+                className="w-20 h-1 accent-cyan-500"
+                title={`Volume: ${Math.round(volume * 100)}%`}
+              />
+              <span className="text-xs text-slate-500 w-7">{Math.round(volume * 100)}%</span>
+            </div>
+            
+            <label className="flex items-center gap-1.5 text-xs text-slate-400 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={e => setAutoRefresh(e.target.checked)}
+                className="rounded bg-slate-700 border-slate-600 w-3.5 h-3.5"
+              />
+              Auto-refresh
+            </label>
+            <button
+              onClick={loadFiles}
+              disabled={loading}
+              className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 disabled:bg-slate-800 text-white rounded text-xs"
+            >
+              {loading ? "Loading..." : "↻ Refresh"}
+            </button>
+          </div>
+        </div>
+
+        {/* Search and filter */}
+        <div className="flex gap-2 mb-3">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search files..."
+            className="flex-1 bg-slate-800 border border-slate-700 rounded px-3 py-1.5 text-sm text-white placeholder-slate-600"
+          />
+          {subfolders.length > 0 && (
+            <select
+              value={filterFolder}
+              onChange={e => setFilterFolder(e.target.value)}
+              className="bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-sm text-white"
+            >
+              <option value="">All folders</option>
+              {subfolders.map(f => (
+                <option key={f} value={f}>{f}</option>
+              ))}
+            </select>
+          )}
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="bg-rose-500/10 border border-rose-500/20 rounded p-2 mb-3 text-xs text-rose-400">
+            {error}
+          </div>
+        )}
+
+        {/* Subfolder tags */}
+        {subfolders.length > 0 && (
+          <div className="flex flex-wrap gap-1 mb-3">
+            <button
+              onClick={() => setFilterFolder("")}
+              className={`px-2 py-0.5 rounded text-xs font-mono transition-colors ${
+                filterFolder === "" 
+                  ? "bg-cyan-500/20 text-cyan-400 border border-cyan-500/40" 
+                  : "bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-600"
+              }`}
+            >
+              all ({files.length})
+            </button>
+            {subfolders.map(folder => {
+              const count = files.filter(f => f.subfolder === folder).length;
+              return (
+                <button
+                  key={folder}
+                  onClick={() => setFilterFolder(filterFolder === folder ? "" : folder)}
+                  className={`px-2 py-0.5 rounded text-xs font-mono transition-colors ${
+                    filterFolder === folder 
+                      ? "bg-amber-500/20 text-amber-400 border border-amber-500/40" 
+                      : "bg-slate-800 text-slate-400 border border-slate-700 hover:border-slate-600"
+                  }`}
+                >
+                  {folder} ({count})
+                </button>
+              );
+            })}
+          </div>
+        )}
+      </div>
+
+      {/* Files list */}
+      <div className="bg-slate-900/50 border border-slate-800 rounded-xl overflow-hidden">
+        <div className="max-h-[calc(100vh-340px)] overflow-y-auto">
+          {filtered.length === 0 ? (
+            <div className="p-8 text-center text-slate-500">
+              {loading ? "Loading..." : files.length === 0 
+                ? "No audio files found. Make sure the words/ directory is mounted."
+                : `No files matching "${search}"`
+              }
+            </div>
+          ) : (
+            filtered.map((file, i) => (
+              <div
+                key={file.path}
+                className={`px-4 py-3 border-b border-slate-800/50 hover:bg-slate-800/30 transition-colors ${
+                  playingFile === file.path ? "bg-cyan-500/5" : ""
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  {/* Play button */}
+                  <button
+                    onClick={() => playFile(file)}
+                    className={`w-9 h-9 flex items-center justify-center rounded-full flex-shrink-0 transition-all ${
+                      playingFile === file.path && isPlaying
+                        ? "bg-cyan-500 text-white"
+                        : playingFile === file.path
+                        ? "bg-cyan-500/50 text-white"
+                        : "bg-slate-700 hover:bg-slate-600 text-slate-300"
+                    }`}
+                  >
+                    {playingFile === file.path && isPlaying ? "⏸" : "▶"}
+                  </button>
+
+                  {/* File info */}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm text-white font-medium truncate">{file.name}</span>
+                      {file.subfolder && (
+                        <span className="text-xs px-1.5 py-0 rounded bg-slate-700 text-slate-400 flex-shrink-0">
+                          {file.subfolder}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-xs text-slate-500 mt-0.5">
+                      {file.modified_str} • {formatSize(file.size)}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Audio player - shown when selected */}
+                {playingFile === file.path && (
+                  <div className="mt-2 ml-12">
+                    <audio
+                      ref={audioRef}
+                      controls
+                      src={`${API_URL}/api/words/play/${encodeURIComponent(file.path)}`}
+                      onLoadedData={(e) => { e.target.volume = volume; e.target.play(); }}
+                      onPlay={() => setIsPlaying(true)}
+                      onPause={() => setIsPlaying(false)}
+                      onEnded={() => { setPlayingFile(null); setIsPlaying(false); }}
+                      className="w-full h-8"
+                      style={{ filter: "invert(1) hue-rotate(180deg)", opacity: 0.8 }}
+                    />
+                  </div>
+                )}
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Tokens Manager - Kalshi/Polymarket events
 function TokensManager() {
   const [source, setSource] = useState("both");
@@ -1911,6 +2194,7 @@ function TokensManager() {
   const [investAmount, setInvestAmount] = useState(100);
   const [filterTag, setFilterTag] = useState("");  // Filter saved tokens by tag
   const [availableTags, setAvailableTags] = useState([]);  // List of tags from Redis
+  const [savedSearch, setSavedSearch] = useState("");  // Text search in saved tokens
 
   // Search tokens directly
   const loadEvents = async () => {
@@ -2157,10 +2441,22 @@ function TokensManager() {
           <div>
             <h2 className="text-base font-bold text-white">SAVED TOKENS</h2>
             <p className="text-xs text-slate-500">
-              {filterTag 
-                ? `${savedTokens.filter(t => (t.tag || "") === filterTag).length} / ${savedTokens.length} tokens`
-                : `${savedTokens.length} tokens`
-              }
+              {(() => {
+                let filtered = savedTokens;
+                if (filterTag) filtered = filtered.filter(t => (t.tag || "") === filterTag);
+                if (savedSearch.trim()) {
+                  const q = savedSearch.trim().toLowerCase();
+                  filtered = filtered.filter(t => 
+                    (t.word || "").toLowerCase().includes(q) ||
+                    (t.token_id || "").toLowerCase().includes(q) ||
+                    (t.tag || "").toLowerCase().includes(q) ||
+                    (t.event || "").toLowerCase().includes(q)
+                  );
+                }
+                return (filterTag || savedSearch.trim())
+                  ? `${filtered.length} / ${savedTokens.length} tokens`
+                  : `${savedTokens.length} tokens`;
+              })()}
             </p>
           </div>
           <div className="flex gap-1">
@@ -2181,6 +2477,15 @@ function TokensManager() {
             </button>
           </div>
         </div>
+        
+        {/* Search in saved tokens */}
+        <input
+          type="text"
+          value={savedSearch}
+          onChange={e => setSavedSearch(e.target.value)}
+          placeholder="Search saved tokens..."
+          className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1.5 text-xs text-white placeholder-slate-600 mb-2"
+        />
         
         {/* Tag filter */}
         {availableTags.length > 0 && (
@@ -2221,15 +2526,25 @@ function TokensManager() {
               </div>
             ) : (
               (() => {
-                // Filter by tag if selected
-                const filteredTokens = filterTag 
+                // Filter by tag and search text
+                let filteredTokens = filterTag 
                   ? savedTokens.filter(t => (t.tag || "") === filterTag)
                   : savedTokens;
+                
+                if (savedSearch.trim()) {
+                  const q = savedSearch.trim().toLowerCase();
+                  filteredTokens = filteredTokens.filter(t => 
+                    (t.word || "").toLowerCase().includes(q) ||
+                    (t.token_id || "").toLowerCase().includes(q) ||
+                    (t.tag || "").toLowerCase().includes(q) ||
+                    (t.event || "").toLowerCase().includes(q)
+                  );
+                }
                 
                 if (filteredTokens.length === 0) {
                   return (
                     <div className="p-4 text-center text-slate-500 text-sm">
-                      No tokens with tag "{filterTag}"
+                      No tokens found{filterTag ? ` with tag "${filterTag}"` : ""}{savedSearch.trim() ? ` matching "${savedSearch.trim()}"` : ""}
                     </div>
                   );
                 }
@@ -2707,6 +3022,7 @@ export default function App() {
             { id: "streams", label: "Streams" },
             { id: "launch", label: "Launch" },
             { id: "tokens", label: "Tokens" },
+            { id: "words", label: "Words" },
           ].map(tab => (
             <button
               key={tab.id}
@@ -2784,6 +3100,10 @@ export default function App() {
         
         {activeTab === "tokens" && (
           <TokensManager />
+        )}
+        
+        {activeTab === "words" && (
+          <WordsPlayer />
         )}
       </main>
       
