@@ -14,9 +14,13 @@ import asyncio
 import os
 import time
 import glob
+import threading
+import requests as req_lib
 from typing import Optional, List
 from datetime import datetime
 from pathlib import Path
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 # Docker SDK
 try:
@@ -2438,6 +2442,489 @@ def play_word_file(file_path: str):
         media_type="audio/wav",
         filename=full_path.name
     )
+
+
+# ============ ESPN Games Monitor ============
+
+ESPN_SPORTS = {
+    "NBA": "https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard",
+    "NFL": "https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard",
+}
+
+# HTTP session with retries
+espn_http = req_lib.Session()
+_retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+espn_http.mount("https://", HTTPAdapter(max_retries=_retry))
+espn_http.mount("http://", HTTPAdapter(max_retries=_retry))
+
+# State
+espn_game_states: dict = {}       # gid -> last known state
+espn_tracked: dict = {}           # gid -> { game_info, auto_start, auto_stop, asr_config, portainer_config }
+espn_active_containers: dict = {} # gid -> container_name
+espn_events: list = []            # event log
+espn_polling_active = False
+espn_portainer_config: dict = {}  # Shared Portainer config for all ESPN games
+
+
+def espn_parse_games(data: dict, sport: str) -> list:
+    games = []
+    for event in data.get("events", []):
+        comp = event["competitions"][0]
+        home = away = home_score = away_score = ""
+        for team in comp["competitors"]:
+            name = team["team"].get("displayName", "???")
+            score = team.get("score", "0")
+            if team["homeAway"] == "home":
+                home, home_score = name, score
+            else:
+                away, away_score = name, score
+        status = event["status"]["type"]
+        detail = status.get("shortDetail", "") or status.get("detail", "")
+        start_date = event.get("date", "")
+        games.append({
+            "id": event["id"],
+            "gid": f"{sport}_{event['id']}",
+            "sport": sport,
+            "home": home, "away": away,
+            "home_score": home_score, "away_score": away_score,
+            "state": status["state"], "detail": detail,
+            "start_date": start_date,
+        })
+    return games
+
+
+def espn_fetch_all_games() -> list:
+    games = []
+    for sport, url in ESPN_SPORTS.items():
+        try:
+            resp = espn_http.get(url, timeout=15)
+            resp.raise_for_status()
+            games.extend(espn_parse_games(resp.json(), sport))
+        except Exception as e:
+            print(f"[ESPN] {sport}: {e}")
+    return games
+
+
+def espn_add_event(event_type: str, text: str):
+    now = datetime.now().strftime("%H:%M:%S")
+    espn_events.insert(0, {"time": now, "type": event_type, "text": text})
+    if len(espn_events) > 200:
+        espn_events.pop()
+
+
+def espn_build_cmd_args(asr_config: dict) -> list:
+    """Build ASR command args from config dict — uses same logic as build_asr_command / handleLaunch."""
+    cmd = []
+    if asr_config.get("words"):
+        cmd.extend(["--words", asr_config["words"]])
+    if asr_config.get("reference"):
+        cmd.extend(["--reference", asr_config["reference"]])
+    threshold = asr_config.get("similarity_threshold", 0.70)
+    if threshold and float(threshold) != 0.70:
+        cmd.extend(["--similarity_threshold", str(threshold)])
+    fmt = asr_config.get("format", "")
+    if fmt and fmt != "bestaudio/best[height<=360]/worst":
+        cmd.extend(["--format", fmt])
+    if asr_config.get("downloader") and asr_config["downloader"] not in ("", "auto"):
+        cmd.extend(["--downloader", asr_config["downloader"]])
+    mi = asr_config.get("monitor_interval", 5)
+    if mi and int(mi) != 5:
+        cmd.extend(["--monitor-interval", str(mi)])
+    hi = asr_config.get("hls_interval", 0.1)
+    if hi and float(hi) != 0.1:
+        cmd.extend(["--hls-interval", str(hi)])
+    cs = asr_config.get("chunk_size_ms", 5000)
+    if cs and int(cs) != 5000:
+        cmd.extend(["--chunk-size-ms", str(cs)])
+    if asr_config.get("print_transcript"):
+        cmd.append("--print-transcript")
+    if asr_config.get("first_therm"):
+        cmd.append("--first-therm")
+    if asr_config.get("autostart"):
+        cmd.append("--autostart")
+    if asr_config.get("verbose"):
+        cmd.append("--verbose")
+    if asr_config.get("no_hls_skip"):
+        cmd.append("--no-hls-skip")
+    if asr_config.get("simulate_realtime"):
+        cmd.append("--simulate-realtime")
+    if asr_config.get("use_fc"):
+        cmd.append("--use-fc")
+    if asr_config.get("input"):
+        cmd.append(asr_config["input"])
+    return cmd
+
+
+def espn_start_asr(gid: str, tracked: dict):
+    """Start ASR container for a tracked game via Portainer API (same as Launch tab)."""
+    pcfg = espn_portainer_config
+    if not pcfg.get("url") or not pcfg.get("token"):
+        espn_add_event("error", f"Portainer not configured — cannot start ASR for {gid}")
+        return
+    
+    asr_config = tracked.get("asr_config", {})
+    game = tracked.get("game_info", {})
+    label = f"{game.get('away', '?')} @ {game.get('home', '?')}"
+    container_name = asr_config.get("name", "") or f"asr-espn-{gid.lower()}"
+    
+    try:
+        headers = {"X-API-Key": pcfg["token"], "Content-Type": "application/json"}
+        base = f"{pcfg['url']}/api/endpoints/{pcfg.get('endpoint_id', 1)}/docker"
+        
+        # Check if container already exists
+        list_resp = espn_http.get(
+            f"{base}/containers/json?all=true",
+            headers={"X-API-Key": pcfg["token"]},
+            timeout=10
+        )
+        if list_resp.status_code == 200:
+            for c in list_resp.json():
+                cname = c["Names"][0].lstrip("/") if c.get("Names") else ""
+                if cname == container_name:
+                    if c["State"] == "running":
+                        espn_add_event("info", f"Container '{container_name}' already running")
+                        espn_active_containers[gid] = container_name
+                        return
+                    else:
+                        # Remove stopped container
+                        espn_http.delete(
+                            f"{base}/containers/{c['Id']}?force=true",
+                            headers={"X-API-Key": pcfg["token"]},
+                            timeout=10
+                        )
+        
+        # Build command args — same logic as Launch tab handleLaunch
+        cmd_args = espn_build_cmd_args(asr_config)
+        
+        # Build volumes
+        volumes_binds = []
+        vpath = pcfg.get("volumes_path", "")
+        if vpath:
+            bp = vpath.rstrip("/")
+            volumes_binds = [
+                f"{bp}/tokens:/app/tokens",
+                f"{bp}/reference_voices:/app/reference_voices",
+                f"{bp}/cookies:/app/cookies",
+            ]
+        
+        # Host config
+        host_config = {
+            "NetworkMode": pcfg.get("network_mode", "asr-network"),
+            "RestartPolicy": {"Name": "no"},
+            "Binds": volumes_binds,
+        }
+        
+        # GPU support
+        if pcfg.get("use_gpu"):
+            host_config["Runtime"] = "nvidia"
+            host_config["DeviceRequests"] = [
+                {"Driver": "nvidia", "Count": -1, "Capabilities": [["gpu"]]}
+            ]
+        
+        container_config = {
+            "Image": pcfg.get("image", "asr-module:latest"),
+            "Env": [
+                f"REDIS_HOST={pcfg.get('redis_host', 'redis')}",
+                f"REDIS_PORT={pcfg.get('redis_port', '6379')}",
+                f"CONTAINER_NAME={container_name}",
+            ],
+            "HostConfig": host_config,
+        }
+        if cmd_args:
+            container_config["Cmd"] = cmd_args
+        
+        # Create container via Portainer
+        create_resp = espn_http.post(
+            f"{base}/containers/create",
+            params={"name": container_name},
+            headers={**headers, "X-Registry-Auth": ""},
+            json=container_config,
+            timeout=30
+        )
+        
+        if create_resp.status_code not in [200, 201]:
+            espn_add_event("error", f"Create failed for {label}: HTTP {create_resp.status_code} - {create_resp.text[:200]}")
+            return
+        
+        container_id = create_resp.json().get("Id", "")[:12]
+        
+        # Start container via Portainer
+        start_resp = espn_http.post(
+            f"{base}/containers/{container_id}/start",
+            headers={"X-API-Key": pcfg["token"]},
+            timeout=10
+        )
+        
+        if start_resp.status_code in [200, 204]:
+            espn_active_containers[gid] = container_name
+            espn_add_event("docker", f"Started '{container_name}' for {label}")
+            print(f"[ESPN] Started container '{container_name}' for {label}")
+        else:
+            espn_add_event("error", f"Start failed for {label}: HTTP {start_resp.status_code}")
+        
+    except Exception as e:
+        espn_add_event("error", f"Failed to start container for {label}: {e}")
+        print(f"[ESPN] Portainer error: {e}")
+
+
+def espn_stop_asr(gid: str):
+    """Stop ASR container for a tracked game via Portainer API."""
+    container_name = espn_active_containers.pop(gid, None)
+    if not container_name:
+        return
+    
+    pcfg = espn_portainer_config
+    if not pcfg.get("url") or not pcfg.get("token"):
+        espn_add_event("error", f"Portainer not configured — cannot stop '{container_name}'")
+        return
+    
+    try:
+        base = f"{pcfg['url']}/api/endpoints/{pcfg.get('endpoint_id', 1)}/docker"
+        headers = {"X-API-Key": pcfg["token"]}
+        
+        # Find container by name
+        list_resp = espn_http.get(
+            f"{base}/containers/json?all=true",
+            headers=headers,
+            timeout=10
+        )
+        if list_resp.status_code != 200:
+            espn_add_event("error", f"Failed to list containers to stop '{container_name}'")
+            return
+        
+        container_id = None
+        for c in list_resp.json():
+            cname = c["Names"][0].lstrip("/") if c.get("Names") else ""
+            if cname == container_name:
+                container_id = c["Id"]
+                break
+        
+        if not container_id:
+            espn_add_event("info", f"Container '{container_name}' already gone")
+            return
+        
+        # Stop
+        espn_http.post(
+            f"{base}/containers/{container_id}/stop",
+            headers=headers,
+            timeout=15
+        )
+        # Remove
+        espn_http.delete(
+            f"{base}/containers/{container_id}?force=true",
+            headers=headers,
+            timeout=10
+        )
+        
+        espn_add_event("docker", f"Stopped '{container_name}'")
+        print(f"[ESPN] Stopped container '{container_name}'")
+        
+    except Exception as e:
+        espn_add_event("error", f"Failed to stop '{container_name}': {e}")
+        print(f"[ESPN] Stop error: {e}")
+
+
+def espn_poll_loop():
+    """Background thread polling ESPN every second."""
+    global espn_polling_active
+    espn_polling_active = True
+    print("[ESPN] Polling started")
+    
+    while espn_polling_active:
+        time.sleep(1)
+        if not espn_tracked:
+            continue
+        
+        for sport, url in ESPN_SPORTS.items():
+            try:
+                resp = espn_http.get(url, timeout=15)
+                resp.raise_for_status()
+                data = resp.json()
+            except Exception:
+                continue
+            
+            for g in espn_parse_games(data, sport):
+                gid = g["gid"]
+                if gid not in espn_tracked:
+                    continue
+                
+                tracked = espn_tracked[gid]
+                prev = espn_game_states.get(gid)
+                curr = g["state"]
+                
+                # Update game info
+                tracked["game_info"] = g
+                
+                if prev != curr:
+                    espn_game_states[gid] = curr
+                    label = f"{g['away']} @ {g['home']}"
+                    
+                    if curr == "in" and prev in (None, "pre"):
+                        espn_add_event("start", f"{label} — GAME STARTED ({g['detail']})")
+                        print(f"[ESPN] STARTED: {label}")
+                        if tracked.get("auto_start", True):
+                            espn_start_asr(gid, tracked)
+                    
+                    elif curr == "post":
+                        score = f"{g['away_score']}-{g['home_score']}"
+                        espn_add_event("end", f"{label} — FINAL {score}")
+                        print(f"[ESPN] ENDED: {label} {score}")
+                        if tracked.get("auto_stop", True):
+                            espn_stop_asr(gid)
+
+
+# Start ESPN polling thread
+espn_thread = threading.Thread(target=espn_poll_loop, daemon=True)
+espn_thread.start()
+
+
+@app.get("/api/espn/games")
+def espn_get_games():
+    """Get today's games from ESPN."""
+    games = espn_fetch_all_games()
+    for g in games:
+        g["tracked"] = g["gid"] in espn_tracked
+    return {"games": games}
+
+
+@app.post("/api/espn/track")
+def espn_track_game(data: dict):
+    """Track or untrack a game."""
+    gid = data.get("gid", "")
+    action = data.get("action", "")  # "track" or "untrack"
+    
+    if action == "track" and gid:
+        # Fetch current game info
+        games = espn_fetch_all_games()
+        game_info = next((g for g in games if g["gid"] == gid), None)
+        
+        espn_tracked[gid] = {
+            "game_info": game_info or {"gid": gid},
+            "auto_start": False,
+            "auto_stop": False,
+            "asr_config": {
+                "name": "",
+                "input": "",
+                "words": "",
+                "reference": "",
+                "similarity_threshold": 0.70,
+                "format": "bestaudio/best[height<=360]/worst",
+                "downloader": "",
+                "monitor_interval": 5,
+                "hls_interval": 0.1,
+                "chunk_size_ms": 5000,
+                "print_transcript": False,
+                "first_therm": False,
+                "autostart": False,
+                "verbose": False,
+                "no_hls_skip": False,
+                "simulate_realtime": False,
+                "use_fc": False,
+            }
+        }
+        
+        if game_info:
+            espn_game_states[gid] = game_info["state"]
+            espn_add_event("track", f"Tracking: {game_info['away']} @ {game_info['home']}")
+            # If game already live, start ASR immediately
+            if game_info["state"] == "in" and espn_tracked[gid]["auto_start"]:
+                espn_start_asr(gid, espn_tracked[gid])
+        
+        return {"ok": True, "tracked": list(espn_tracked.keys())}
+    
+    elif action == "untrack" and gid:
+        # Stop container if running
+        espn_stop_asr(gid)
+        espn_tracked.pop(gid, None)
+        espn_game_states.pop(gid, None)
+        espn_add_event("untrack", f"Untracked: {gid}")
+        return {"ok": True, "tracked": list(espn_tracked.keys())}
+    
+    raise HTTPException(status_code=400, detail="Invalid action")
+
+
+@app.get("/api/espn/tracked")
+def espn_get_tracked():
+    """Get all tracked games with their settings."""
+    result = {}
+    for gid, t in espn_tracked.items():
+        result[gid] = {
+            **t,
+            "container_running": gid in espn_active_containers,
+            "container_name": espn_active_containers.get(gid, ""),
+        }
+    return result
+
+
+@app.get("/api/espn/portainer")
+def espn_get_portainer():
+    """Get current Portainer config for ESPN."""
+    return {
+        "configured": bool(espn_portainer_config.get("url") and espn_portainer_config.get("token")),
+        "url": espn_portainer_config.get("url", ""),
+        "image": espn_portainer_config.get("image", ""),
+    }
+
+
+@app.post("/api/espn/portainer")
+def espn_set_portainer(data: dict):
+    """Set Portainer config for ESPN auto-launch."""
+    global espn_portainer_config
+    espn_portainer_config = {
+        "url": data.get("url", ""),
+        "token": data.get("token", ""),
+        "endpoint_id": int(data.get("endpoint_id", 1)),
+        "image": data.get("image", "asr-module:latest"),
+        "volumes_path": data.get("volumes_path", ""),
+        "redis_host": data.get("redis_host", "redis"),
+        "redis_port": data.get("redis_port", "6379"),
+        "network_mode": data.get("network_mode", "asr-network"),
+        "use_gpu": bool(data.get("use_gpu", False)),
+    }
+    espn_add_event("config", f"Portainer configured: {espn_portainer_config['url']}")
+    return {"ok": True, "configured": True}
+
+
+@app.patch("/api/espn/tracked/{gid}")
+def espn_update_tracked(gid: str, data: dict):
+    """Update settings for a tracked game."""
+    if gid not in espn_tracked:
+        raise HTTPException(status_code=404, detail="Game not tracked")
+    
+    tracked = espn_tracked[gid]
+    
+    if "auto_start" in data:
+        tracked["auto_start"] = bool(data["auto_start"])
+    if "auto_stop" in data:
+        tracked["auto_stop"] = bool(data["auto_stop"])
+    if "asr_config" in data:
+        tracked["asr_config"].update(data["asr_config"])
+    
+    return {"ok": True, "tracked": tracked}
+
+
+@app.post("/api/espn/tracked/{gid}/start-asr")
+def espn_manual_start_asr(gid: str):
+    """Manually start ASR for a tracked game."""
+    if gid not in espn_tracked:
+        raise HTTPException(status_code=404, detail="Game not tracked")
+    espn_start_asr(gid, espn_tracked[gid])
+    return {"ok": True, "container": espn_active_containers.get(gid, "")}
+
+
+@app.post("/api/espn/tracked/{gid}/stop-asr")
+def espn_manual_stop_asr(gid: str):
+    """Manually stop ASR for a tracked game."""
+    if gid not in espn_tracked:
+        raise HTTPException(status_code=404, detail="Game not tracked")
+    espn_stop_asr(gid)
+    return {"ok": True}
+
+
+@app.get("/api/espn/events")
+def espn_get_events():
+    """Get event log."""
+    return {"events": espn_events}
 
 
 if __name__ == "__main__":

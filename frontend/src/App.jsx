@@ -1895,6 +1895,532 @@ function ExchangeOrderbookView({ tokenId, tokenInfo, investAmount, setInvestAmou
   );
 }
 
+// ESPN Games Monitor - track games and auto-launch ASR
+function GamesMonitor() {
+  const [games, setGames] = useState([]);
+  const [tracked, setTracked] = useState({});
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const [selectedGame, setSelectedGame] = useState(null); // gid of expanded tracked game
+  const [advancedOpen, setAdvancedOpen] = useState({}); // gid -> bool for advanced settings
+  const [sportFilter, setSportFilter] = useState(""); // "" = all
+  const [portainerOk, setPortainerOk] = useState(false);
+  
+  // Sync Portainer config from localStorage to backend
+  const syncPortainer = async () => {
+    try {
+      const saved = localStorage.getItem('portainer_config');
+      if (!saved) { setPortainerOk(false); return; }
+      const pcfg = JSON.parse(saved);
+      if (!pcfg.url || !pcfg.token) { setPortainerOk(false); return; }
+      
+      await fetch(`${API_URL}/api/espn/portainer`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(pcfg),
+      });
+      setPortainerOk(true);
+    } catch { setPortainerOk(false); }
+  };
+  
+  const loadGames = async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const [gamesRes, trackedRes, eventsRes] = await Promise.all([
+        fetch(`${API_URL}/api/espn/games`),
+        fetch(`${API_URL}/api/espn/tracked`),
+        fetch(`${API_URL}/api/espn/events`),
+      ]);
+      const gamesData = await gamesRes.json();
+      const trackedData = await trackedRes.json();
+      const eventsData = await eventsRes.json();
+      setGames(gamesData.games || []);
+      setTracked(trackedData || {});
+      setEvents(eventsData.events || []);
+    } catch (err) {
+      console.error("ESPN load error:", err);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    syncPortainer();
+    loadGames();
+    const interval = setInterval(() => loadGames(true), 3000);
+    // Re-sync Portainer config every 30s in case user changed it in Launch tab
+    const pInterval = setInterval(syncPortainer, 30000);
+    return () => { clearInterval(interval); clearInterval(pInterval); };
+  }, []);
+
+  const trackGame = async (gid, action) => {
+    await fetch(`${API_URL}/api/espn/track`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ gid, action }),
+    });
+    loadGames();
+  };
+
+  const updateTracked = async (gid, updates) => {
+    await fetch(`${API_URL}/api/espn/tracked/${gid}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    loadGames(true);
+  };
+
+  const manualStartASR = async (gid) => {
+    await syncPortainer(); // Ensure latest Portainer config is on backend
+    await fetch(`${API_URL}/api/espn/tracked/${gid}/start-asr`, { method: "POST" });
+    loadGames(true);
+  };
+
+  const manualStopASR = async (gid) => {
+    await fetch(`${API_URL}/api/espn/tracked/${gid}/stop-asr`, { method: "POST" });
+    loadGames(true);
+  };
+
+  const stateColor = (state) => {
+    if (state === "pre") return "text-amber-400 bg-amber-500/15";
+    if (state === "in") return "text-emerald-400 bg-emerald-500/15";
+    return "text-slate-500 bg-slate-500/15";
+  };
+
+  const stateLabel = (state) => {
+    if (state === "pre") return "PRE";
+    if (state === "in") return "LIVE";
+    return "FINAL";
+  };
+
+  const filteredGames = sportFilter ? games.filter(g => g.sport === sportFilter) : games;
+  const trackedGids = Object.keys(tracked);
+  const sports = [...new Set(games.map(g => g.sport))];
+
+  return (
+    <div className="space-y-3" style={{ height: "calc(100vh - 180px)" }}>
+      {/* Portainer status */}
+      {!portainerOk && (
+        <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg px-4 py-2 flex items-center gap-3">
+          <span className="text-amber-400 text-sm font-bold">⚠</span>
+          <span className="text-amber-300 text-sm">
+            Portainer not configured — configure it in <strong>Launch</strong> tab first, then return here. Auto-launch won't work without it.
+          </span>
+        </div>
+      )}
+      {portainerOk && (
+        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg px-4 py-1.5 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-emerald-400" />
+          <span className="text-emerald-400 text-xs font-mono">Portainer connected — auto-launch ready</span>
+        </div>
+      )}
+      
+      <div className="grid grid-cols-12 gap-4" style={{ height: portainerOk ? "calc(100% - 44px)" : "calc(100% - 56px)" }}>
+      
+      {/* Left: Today's Games */}
+      <div className="col-span-5 bg-slate-900/50 border border-slate-800 rounded-xl p-4 overflow-hidden flex flex-col">
+        <div className="flex justify-between items-center mb-3">
+          <div>
+            <h2 className="text-base font-bold text-white">TODAY'S GAMES</h2>
+            <p className="text-xs text-slate-500">{games.length} games • {trackedGids.length} tracked</p>
+          </div>
+          <button
+            onClick={() => loadGames()}
+            disabled={loading}
+            className="px-2 py-1 bg-slate-700 hover:bg-slate-600 text-white rounded text-xs"
+          >
+            {loading ? "..." : "↻"}
+          </button>
+        </div>
+
+        {/* Sport filter */}
+        {sports.length > 1 && (
+          <div className="flex gap-1 mb-2">
+            <button
+              onClick={() => setSportFilter("")}
+              className={`px-2 py-0.5 rounded text-xs font-mono ${!sportFilter ? "bg-cyan-500/20 text-cyan-400" : "bg-slate-800 text-slate-400"}`}
+            >ALL</button>
+            {sports.map(s => (
+              <button
+                key={s}
+                onClick={() => setSportFilter(sportFilter === s ? "" : s)}
+                className={`px-2 py-0.5 rounded text-xs font-mono ${sportFilter === s ? "bg-cyan-500/20 text-cyan-400" : "bg-slate-800 text-slate-400"}`}
+              >{s}</button>
+            ))}
+          </div>
+        )}
+
+        <div className="flex-1 overflow-y-auto space-y-1.5">
+          {filteredGames.length === 0 ? (
+            <div className="text-center text-slate-500 text-sm py-8">
+              {loading ? "Loading games..." : "No games today"}
+            </div>
+          ) : (
+            filteredGames.map(g => (
+              <div
+                key={g.gid}
+                className={`p-3 rounded-lg border transition-all ${
+                  g.tracked 
+                    ? "border-emerald-500/40 bg-emerald-500/5" 
+                    : "border-slate-700 bg-slate-800/30 hover:border-slate-600"
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-semibold text-white truncate">
+                      {g.away} @ {g.home}
+                    </div>
+                    <div className="flex items-center gap-2 mt-1">
+                      <span className={`px-1.5 py-0 rounded text-[10px] font-bold font-mono ${stateColor(g.state)}`}>
+                        {stateLabel(g.state)}
+                      </span>
+                      <span className="text-xs text-slate-500 font-mono">{g.sport}</span>
+                      {g.state !== "pre" && (
+                        <span className="text-xs text-slate-400 font-mono">{g.away_score}-{g.home_score}</span>
+                      )}
+                      <span className="text-xs text-slate-600">{g.detail}</span>
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => trackGame(g.gid, g.tracked ? "untrack" : "track")}
+                    className={`px-3 py-1.5 rounded text-xs font-bold font-mono transition-all flex-shrink-0 ${
+                      g.tracked
+                        ? "bg-emerald-500 text-black hover:bg-rose-500 hover:text-white"
+                        : "bg-slate-700 text-slate-300 hover:border-emerald-500 hover:text-emerald-400 border border-slate-600"
+                    }`}
+                  >
+                    {g.tracked ? "TRACKING" : "TRACK"}
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Middle: Tracked Games with Settings */}
+      <div className="col-span-4 bg-slate-900/50 border border-slate-800 rounded-xl p-4 overflow-hidden flex flex-col">
+        <h2 className="text-base font-bold text-white mb-3">TRACKED GAMES</h2>
+        
+        <div className="flex-1 overflow-y-auto space-y-2">
+          {trackedGids.length === 0 ? (
+            <div className="text-center text-slate-500 text-sm py-8">
+              No games tracked.<br/>
+              <span className="text-xs">← Select games to track</span>
+            </div>
+          ) : (
+            trackedGids.map(gid => {
+              const t = tracked[gid];
+              const g = t.game_info || {};
+              const isExpanded = selectedGame === gid;
+              const config = t.asr_config || {};
+              
+              return (
+                <div key={gid} className="border border-slate-700 rounded-lg overflow-hidden">
+                  {/* Game header */}
+                  <div
+                    className="p-3 cursor-pointer hover:bg-slate-800/50 transition-colors"
+                    onClick={() => setSelectedGame(isExpanded ? null : gid)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <div className="flex-1">
+                        <div className="text-sm font-semibold text-white">
+                          {g.away || "?"} @ {g.home || "?"}
+                        </div>
+                        <div className="flex items-center gap-2 mt-1">
+                          <span className={`px-1.5 py-0 rounded text-[10px] font-bold font-mono ${stateColor(g.state)}`}>
+                            {stateLabel(g.state)}
+                          </span>
+                          {g.state !== "pre" && (
+                            <span className="text-xs text-slate-400 font-mono">{g.away_score}-{g.home_score}</span>
+                          )}
+                          <span className="text-xs text-slate-600">{g.detail}</span>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {t.container_running && (
+                          <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" title="ASR running" />
+                        )}
+                        <span className="text-slate-500 text-xs">{isExpanded ? "▲" : "▼"}</span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Expanded settings */}
+                  {isExpanded && (
+                    <div className="border-t border-slate-700 p-3 space-y-3 bg-slate-800/20">
+                      {/* Auto toggles */}
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={t.auto_start === true}
+                            onChange={e => updateTracked(gid, { auto_start: e.target.checked })}
+                            className="rounded bg-slate-700 border-slate-600 w-3.5 h-3.5"
+                          />
+                          Auto-start ASR on game start
+                        </label>
+                        <label className="flex items-center gap-2 text-xs text-slate-300 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={t.auto_stop === true}
+                            onChange={e => updateTracked(gid, { auto_stop: e.target.checked })}
+                            className="rounded bg-slate-700 border-slate-600 w-3.5 h-3.5"
+                          />
+                          Auto-stop on game end
+                        </label>
+                      </div>
+
+                      {/* ASR Config — identical to Launch tab */}
+                      <div className="space-y-2">
+                        <div className="text-xs text-slate-500 font-bold uppercase tracking-wider">Basic Settings</div>
+                        
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-xs text-slate-500 block mb-0.5">Container Name</label>
+                            <input
+                              type="text"
+                              value={config.name || ""}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, name: e.target.value } })}
+                              placeholder={`asr-espn-${gid.toLowerCase()}`}
+                              className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-600"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs text-slate-500 block mb-0.5">Reference Voice(s) *</label>
+                            <input
+                              type="text"
+                              value={config.reference || ""}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, reference: e.target.value } })}
+                              placeholder="trump or trump,melania,powell"
+                              className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-600"
+                            />
+                          </div>
+                        </div>
+                        
+                        <div>
+                          <label className="text-xs text-slate-500 block mb-0.5">Stream URL *</label>
+                          <input
+                            type="text"
+                            value={config.input || ""}
+                            onChange={e => updateTracked(gid, { asr_config: { ...config, input: e.target.value } })}
+                            placeholder="https://www.youtube.com/watch?v=... or Twitter Space URL"
+                            className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-600"
+                          />
+                        </div>
+                        
+                        <div>
+                          <label className="text-xs text-slate-500 block mb-0.5">Words/Tokens CSV File *</label>
+                          <input
+                            type="text"
+                            value={config.words || ""}
+                            onChange={e => updateTracked(gid, { asr_config: { ...config, words: e.target.value } })}
+                            placeholder="tokens/trump_jan22.csv"
+                            className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white placeholder-slate-600"
+                          />
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-xs text-slate-500 block mb-0.5">Similarity Threshold</label>
+                            <input
+                              type="number"
+                              step="0.01"
+                              min="0" max="1"
+                              value={config.similarity_threshold ?? 0.70}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, similarity_threshold: parseFloat(e.target.value) || 0.70 } })}
+                              className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono"
+                            />
+                            <div className="text-[10px] text-slate-600 mt-0.5">0.70 = default</div>
+                          </div>
+                          <div>
+                            <label className="text-xs text-slate-500 block mb-0.5">Format (yt-dlp)</label>
+                            <select
+                              value={config.format || "bestaudio/best[height<=360]/worst"}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, format: e.target.value } })}
+                              className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white"
+                            >
+                              <option value="bestaudio/best[height<=360]/worst">Best Audio (default)</option>
+                              <option value="best">Best</option>
+                              <option value="worst">Worst (fastest)</option>
+                              <option value="bestaudio">Best Audio Only</option>
+                            </select>
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap gap-3">
+                          <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                            <input type="checkbox" checked={config.print_transcript || false}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, print_transcript: e.target.checked } })}
+                              className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                            Print Transcript
+                          </label>
+                          <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                            <input type="checkbox" checked={config.autostart || false}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, autostart: e.target.checked } })}
+                              className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                            Autostart (wait for stream)
+                          </label>
+                          <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer">
+                            <input type="checkbox" checked={config.verbose || false}
+                              onChange={e => updateTracked(gid, { asr_config: { ...config, verbose: e.target.checked } })}
+                              className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                            Verbose
+                          </label>
+                        </div>
+                      </div>
+
+                      {/* Advanced Settings — collapsible */}
+                      <div>
+                        <button
+                          onClick={() => setAdvancedOpen(prev => ({ ...prev, [gid]: !prev[gid] }))}
+                          className="text-xs text-slate-400 hover:text-slate-300 flex items-center gap-1"
+                        >
+                          <span>{advancedOpen[gid] ? "▼" : "▶"}</span>
+                          Advanced Settings
+                        </button>
+                        
+                        {advancedOpen[gid] && (
+                          <div className="mt-2 space-y-2 p-2 bg-slate-800/30 rounded border border-slate-700">
+                            <div className="grid grid-cols-3 gap-2">
+                              <div>
+                                <label className="text-[10px] text-slate-500 block mb-0.5">Downloader</label>
+                                <select
+                                  value={config.downloader || ""}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, downloader: e.target.value } })}
+                                  className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white"
+                                >
+                                  <option value="">Auto-detect</option>
+                                  <option value="ffmpeg">FFmpeg</option>
+                                  <option value="youtube">YouTube</option>
+                                  <option value="hls">HLS</option>
+                                  <option value="netflix">Netflix</option>
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-slate-500 block mb-0.5">Monitor Interval (sec)</label>
+                                <input type="number" value={config.monitor_interval ?? 5}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, monitor_interval: parseInt(e.target.value) || 5 } })}
+                                  className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono" />
+                              </div>
+                              <div>
+                                <label className="text-[10px] text-slate-500 block mb-0.5">HLS Interval (sec)</label>
+                                <input type="number" step="0.1" value={config.hls_interval ?? 0.1}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, hls_interval: parseFloat(e.target.value) || 0.1 } })}
+                                  className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono" />
+                              </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div>
+                                <label className="text-[10px] text-slate-500 block mb-0.5">Chunk Size (ms)</label>
+                                <input type="number" value={config.chunk_size_ms ?? 5000}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, chunk_size_ms: parseInt(e.target.value) || 5000 } })}
+                                  className="w-full bg-slate-800 border border-slate-700 rounded px-2 py-1 text-xs text-white font-mono" />
+                              </div>
+                            </div>
+                            <div className="flex flex-wrap gap-3">
+                              <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                                <input type="checkbox" checked={config.first_therm || false}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, first_therm: e.target.checked } })}
+                                  className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                                First Therm
+                              </label>
+                              <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                                <input type="checkbox" checked={config.no_hls_skip || false}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, no_hls_skip: e.target.checked } })}
+                                  className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                                No HLS Skip
+                              </label>
+                              <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                                <input type="checkbox" checked={config.simulate_realtime || false}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, simulate_realtime: e.target.checked } })}
+                                  className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                                Simulate Realtime
+                              </label>
+                              <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                                <input type="checkbox" checked={config.use_fc || false}
+                                  onChange={e => updateTracked(gid, { asr_config: { ...config, use_fc: e.target.checked } })}
+                                  className="rounded bg-slate-700 border-slate-600 w-3 h-3" />
+                                Use FC
+                              </label>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Manual controls */}
+                      <div className="flex gap-2 pt-1">
+                        {t.container_running ? (
+                          <button
+                            onClick={() => manualStopASR(gid)}
+                            className="px-3 py-1.5 bg-rose-500/20 hover:bg-rose-500/30 text-rose-400 rounded text-xs font-bold"
+                          >
+                            ■ Stop ASR
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => manualStartASR(gid)}
+                            className="px-3 py-1.5 bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-400 rounded text-xs font-bold"
+                          >
+                            ▶ Start ASR
+                          </button>
+                        )}
+                        <button
+                          onClick={() => trackGame(gid, "untrack")}
+                          className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-300 rounded text-xs"
+                        >
+                          Untrack
+                        </button>
+                        {t.container_running && (
+                          <span className="text-xs text-emerald-400 flex items-center gap-1 ml-auto">
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                            {t.container_name}
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </div>
+
+      {/* Right: Event Log */}
+      <div className="col-span-3 bg-slate-900/50 border border-slate-800 rounded-xl p-4 overflow-hidden flex flex-col">
+        <h2 className="text-base font-bold text-white mb-3">EVENT LOG</h2>
+        <div className="flex-1 overflow-y-auto">
+          {events.length === 0 ? (
+            <div className="text-center text-slate-500 text-sm py-8">
+              Waiting for events...
+            </div>
+          ) : (
+            events.map((ev, i) => (
+              <div key={i} className="py-1.5 border-b border-slate-800/50 font-mono text-xs flex gap-2">
+                <span className="text-slate-600 flex-shrink-0">{ev.time}</span>
+                <span className={`flex-shrink-0 font-bold ${
+                  ev.type === "start" ? "text-emerald-400" :
+                  ev.type === "end" ? "text-amber-400" :
+                  ev.type === "docker" ? "text-cyan-400" :
+                  ev.type === "error" ? "text-rose-400" :
+                  ev.type === "track" ? "text-violet-400" :
+                  "text-slate-500"
+                }`}>
+                  [{ev.type.toUpperCase()}]
+                </span>
+                <span className="text-slate-300 break-all">{ev.text}</span>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+      </div>
+    </div>
+  );
+}
+
 // Words Audio Player - listen to detected word audio clips
 function WordsPlayer() {
   const [files, setFiles] = useState([]);
@@ -3023,6 +3549,7 @@ export default function App() {
             { id: "launch", label: "Launch" },
             { id: "tokens", label: "Tokens" },
             { id: "words", label: "Words" },
+            { id: "games", label: "Games" },
           ].map(tab => (
             <button
               key={tab.id}
@@ -3104,6 +3631,10 @@ export default function App() {
         
         {activeTab === "words" && (
           <WordsPlayer />
+        )}
+        
+        {activeTab === "games" && (
+          <GamesMonitor />
         )}
       </main>
       
